@@ -139,7 +139,7 @@ Containment backends (`RESPONDER_ACTIONS`, all free):
 |---|---|
 | `blocklist` | Maintains `/feeds/blocklist.txt?token=…`. pfSense/OPNsense URL-table aliases, FortiGate external threat feeds, nginx, fail2ban and most firewalls can consume it. |
 | `webhook` | Signed JSON to any SOAR (Shuffle, n8n, Tines community) for EDR host isolation or NAC quarantine. |
-| `wazuh` | Calls the Wazuh 4.x API active-response endpoint (default `!firewall-drop` against the source IP on the agents you choose). |
+| `wazuh` | Calls the Wazuh 4.x API active-response endpoint, which drops the source IP in the firewall of the agents you choose. Tested end to end against a real Wazuh 4.14 manager and agent. A call that reaches zero agents is reported as a failure, never as isolated. |
 
 **Blue Team MCP.** The responder also *is* an MCP server (`/mcp/`, bearer token `RESPONDER_MCP_TOKEN`), with tools `list_incidents`, `get_incident`, `approve_isolation`, `reject_isolation`, `release_isolation` and `get_audit_log`. A defender's AI agent can triage and act, with the same safety rails as the dashboard. Everything the attacker wrote (tool arguments, client names, messages) is returned under `untrusted_attacker_data` with an explicit notice, so an attacker cannot prompt-inject your defending agent through the evidence.
 
@@ -184,7 +184,7 @@ ruff check src tests && mypy src && bandit -ll -r src
 * An MCP server sees tool calls and arguments, **not** the prompt the attacker's agent received. "Exact prompt" therefore means the exact call, plus any natural-language justification the agent writes into arguments (which Chimera captures and flags).
 * The isolation target is the source IP the honeypot sees. Behind NAT or a shared egress, that is the NAT address. Add such addresses to `RESPONDER_PROTECTED_NETWORKS` and use the SOAR webhook to resolve the real host.
 * Publish the decoy over IPv4. Docker forwards IPv6 clients (and any traffic through `docker-proxy`) from the edge gateway address, which hides the real source. The compose file protects Docker's own subnets so this can never isolate everyone, but you lose attribution for those clients.
-* The Wazuh integration follows the Wazuh 4.x API documentation but has not been exercised against a live Wazuh manager in this release. Run it in `dry_run` or `approve` mode first.
+* The Wazuh API cannot undo an active response. Use a timed command (see [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md#wazuh)) so blocks lift by themselves; with the bare `!firewall-drop` script a block is permanent until removed on the agent, and the dashboard says so on release.
 * MCP SDK 2.x (`mcp>=2.3`) is required. Both the 2026 stateless protocol and legacy stateful clients (`initialize` handshake) are supported and tested.
 
 ## License

@@ -56,9 +56,42 @@ A honeypot only works if attackers find it. Make it findable the way a real inte
 |---|---|
 | Firewall blocks the attacker | `RESPONDER_ACTIONS=blocklist` and `RESPONDER_FEED_TOKEN`. Point your firewall's URL alias or external feed at `http://<responder>:9000/feeds/blocklist.txt?token=…`. |
 | EDR host isolation or NAC quarantine | `RESPONDER_ACTIONS=webhook` plus `RESPONDER_ACTION_WEBHOOK_URL` pointing at Shuffle, n8n or Tines. Payload: `{"action":"isolate","target_ip":…,"incident_id":…,"context":{…}}`, signed with `X-Chimera-Signature`. |
-| Wazuh | `RESPONDER_ACTIONS=wazuh` and `RESPONDER_WAZUH_*`. The default command `!firewall-drop` blocks the source IP on the selected agents. |
+| Wazuh | `RESPONDER_ACTIONS=wazuh` and `RESPONDER_WAZUH_*`. See [Wazuh](#wazuh) below. |
 
 Start with `RESPONDER_MODE=approve`, or `dry_run` for a week of observation. Move to `auto` once you trust the signal.
+
+### Wazuh
+
+Tested against a real Wazuh 4.14.10 manager and agent: an approved incident put `DROP` rules for the attacker's IP into the agent's `INPUT` and `FORWARD` chains within seconds, and Wazuh removed them by itself when the timeout ended.
+
+1. On the Wazuh manager, add a timed response to `/var/ossec/etc/ossec.conf` and restart the manager. The `rules_id` is a placeholder so Wazuh never fires it by itself; Chimera triggers it through the API.
+
+   ```xml
+   <ossec_config>
+     <active-response>
+       <disabled>no</disabled>
+       <command>firewall-drop</command>
+       <location>local</location>
+       <rules_id>100900</rules_id>
+       <timeout>3600</timeout>
+     </active-response>
+   </ossec_config>
+   ```
+
+2. Set in `.env`:
+
+   ```
+   RESPONDER_ACTIONS=blocklist,wazuh
+   RESPONDER_WAZUH_URL=https://wazuh-manager.corp.example:55000
+   RESPONDER_WAZUH_USER=<API user with active-response:command permission>
+   RESPONDER_WAZUH_PASSWORD=...
+   RESPONDER_WAZUH_COMMAND=firewall-drop3600     # "firewall-drop" + the timeout above
+   RESPONDER_WAZUH_AGENTS=001,002                 # gateways / web servers that should drop the attacker, or "all"
+   ```
+
+3. Give the responder a route to the manager (put the manager's network or address on the `soc` side).
+
+The Wazuh API has no "undo" call, so **Release** relies on that timeout. With the bare script `RESPONDER_WAZUH_COMMAND=!firewall-drop` (no manager change needed) blocks are permanent; the dashboard marks the release step ✗ and prints the `iptables -D` command to run on the agents. If Wazuh answers but no agent was blocked (wrong agent id, command not defined on the manager, agent offline), the incident shows **failed** with Wazuh's reason, so you never believe a host is contained when it is not.
 
 ## 6. Feed your SIEM
 
