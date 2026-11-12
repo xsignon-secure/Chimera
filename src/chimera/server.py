@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import ipaddress
 import logging
+import secrets
 import time
 from collections import defaultdict, deque
 from collections.abc import AsyncIterator, Awaitable, Callable, MutableMapping
@@ -29,8 +30,8 @@ ASGIApp = Callable[[Scope, Receive, Send], Awaitable[None]]
 def build_mcp(engine: Engine) -> MCPServer:
     p = engine.profile
     server: MCPServer = MCPServer(
-        name=p.server_name,
-        version=p.version,
+        name=engine.server_name,
+        version=engine.server_version,
         instructions=p.instructions,
         middleware=[engine.sensor],
         log_level="WARNING",
@@ -129,8 +130,9 @@ class ChimeraApp:
             streamable_http_path=s.mcp_path,
             transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False),
             max_request_body_size=512 * 1024,
-            max_sessions=2000,
-            session_idle_timeout=1800,
+            # Stateless: no server-side session table an attacker could exhaust. Works for both the
+            # 2026 stateless protocol and legacy clients (their initialize simply gets no session id).
+            stateless_http=True,
             host=s.host,
         )
         inner: ASGIApp = self._dispatch
@@ -202,16 +204,24 @@ class ChimeraApp:
             return JSONResponse({"status": "ok"})
         if await self.engine.canary_callback(path, ip, port, headers):
             if "exports" in path:
-                return PlainTextResponse("AccessDenied: Request has expired", status_code=403)
+                rid = secrets.token_hex(8).upper()
+                return Response(
+                    '<?xml version="1.0" encoding="UTF-8"?>\n<Error><Code>AccessDenied</Code>'
+                    "<Message>Request has expired</Message>"
+                    f"<RequestId>{rid}</RequestId><HostId>{secrets.token_urlsafe(48)}</HostId></Error>",
+                    status_code=403,
+                    media_type="application/xml",
+                    headers={"x-amz-request-id": rid},
+                )
             return HTMLResponse(_LOGIN_PAGE.format(name="Single Sign-On"))
         await self.engine.http_probe(path, request.method, ip, port, headers)
         if path in {"/", "/login", "/admin"}:
-            return HTMLResponse(_LOGIN_PAGE.format(name=self.engine.profile.server_name))
+            return HTMLResponse(_LOGIN_PAGE.format(name=self.engine.server_name))
         if path == "/.well-known/mcp.json" or path == "/.well-known/mcp":
             return JSONResponse(
                 {
-                    "name": self.engine.profile.server_name,
-                    "version": self.engine.profile.version,
+                    "name": self.engine.server_name,
+                    "version": self.engine.server_version,
                     "endpoints": {"streamable-http": self.engine.settings.mcp_path},
                 }
             )

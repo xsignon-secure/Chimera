@@ -8,6 +8,7 @@ with freshly issued canaries, so reading them arms a tripwire.
 
 from __future__ import annotations
 
+import base64
 import re
 import shlex
 from collections.abc import Awaitable, Callable
@@ -18,6 +19,8 @@ IssueFn = Callable[[str, str], Awaitable[tuple[str, str | None]]]
 """``issue(kind, context) -> (value, secondary)``"""
 
 _URL_RE = re.compile(r"https?://[^\s'\"|;&]+")
+# A fake directory listing key; nothing is ever written to disk.
+_TMP = "/tmp"  # noqa: S108  # nosec B108
 
 
 class FakeShell:
@@ -27,19 +30,83 @@ class FakeShell:
         self.user = "svc-deploy"
         self.issue = issue
 
+    MAX_SEGMENTS = 16
+
+    def _env(self) -> dict[str, str]:
+        return {
+            "HOME": f"/home/{self.user}",
+            "USER": self.user,
+            "LOGNAME": self.user,
+            "SHELL": "/bin/bash",
+            "HOSTNAME": self.host,
+            "PWD": f"/home/{self.user}",
+            "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+            "AWS_DEFAULT_REGION": self.world.region,
+        }
+
+    def _expand(self, text: str) -> str:
+        env = self._env()
+        text = re.sub(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?", lambda m: env.get(m.group(1), ""), text)
+        return re.sub(r"(^|\s)~(?=/|\s|$)", lambda m: m.group(1) + env["HOME"], text)
+
     async def run(self, command: str) -> tuple[str, int, list[str]]:
         """Return ``(output, exit_code, urls_seen)`` for a command line."""
         urls = _URL_RE.findall(command)
         outputs: list[str] = []
         code = 0
-        for segment in re.split(r"\s*(?:;|&&|\|\|)\s*", command.strip()):
-            if not segment:
-                continue
-            first = segment.split("|", 1)[0].strip()
-            out, code = await self._one(first)
+        segments = [seg for seg in re.split(r"\s*(?:;|&&|\|\|)\s*", command.strip()) if seg]
+        for segment in segments[: self.MAX_SEGMENTS]:
+            stages = [st.strip() for st in segment.split("|")]
+            out, code = await self._one(self._expand(stages[0]))
+            for stage in stages[1:]:
+                out, code = self._filter(self._expand(stage), out, code)
             if out:
                 outputs.append(out)
         return "\n".join(outputs), code, urls
+
+    @staticmethod
+    def _filter(cmd: str, data: str, code: int) -> tuple[str, int]:
+        """Emulate common pipeline filters on the previous stage's output."""
+        try:
+            argv = shlex.split(cmd)
+        except ValueError:
+            return "bash: syntax error: unexpected end of file", 2
+        if not argv:
+            return data, code
+        name, args = argv[0].rsplit("/", 1)[-1], argv[1:]
+        lines = data.splitlines()
+        num = next((int(a.lstrip("-n")) for a in args if a.lstrip("-n").isdigit()), 10)
+        if name == "head":
+            return "\n".join(lines[:num]), code
+        if name == "tail":
+            return "\n".join(lines[-num:]), code
+        if name == "wc":
+            if "-l" in args:
+                return str(len(lines)), code
+            return f"{len(lines):>7} {len(data.split()):>7} {len(data) + 1:>7}", code
+        if name == "sort":
+            return "\n".join(sorted(lines, reverse="-r" in args)), code
+        if name == "uniq":
+            return "\n".join(dict.fromkeys(lines)), code
+        if name in {"grep", "egrep"}:
+            pat = next((a for a in args if not a.startswith("-")), "")
+            invert, icase = "-v" in args, "-i" in args
+            keep = [ln for ln in lines if ((pat.lower() in ln.lower()) if icase else (pat in ln)) != invert]
+            return "\n".join(keep), 0 if keep else 1
+        if name == "base64":
+            if "-d" in args or "--decode" in args:
+                try:
+                    return base64.b64decode(data.strip()).decode(errors="replace"), code
+                except ValueError:
+                    return "base64: invalid input", 1
+            return base64.b64encode((data + "\n").encode()).decode(), code
+        if name in {"cat", "tee", "less", "more"}:
+            return data, code
+        if name in {"sh", "bash", "zsh", "python3", "python", "perl"}:
+            return "", 0
+        if name in {"nc", "ncat", "curl", "wget"}:
+            return f"{name}: (28) Connection timed out after 30001 milliseconds", 28
+        return f"bash: {name}: command not found", 127
 
     async def _one(self, cmd: str) -> tuple[str, int]:
         try:
@@ -135,6 +202,12 @@ class FakeShell:
             "/etc": "hosts  passwd  shadow  ssh  vault  nginx",
             "exports": "customers_2026-10.csv.gz  invoices_2026-10.parquet",
             "/": "bin  boot  dev  etc  home  lib  opt  proc  root  srv  tmp  usr  var",
+            _TMP: "snap-private-tmp  systemd-private-3f1c-vault.service-Xz9Lq",
+            "/opt": "deploy  vault-agent",
+            "/var/log": "auth.log  syslog  vault  nginx",
+            "/root": "ls: cannot open directory '/root': Permission denied",
+            f"/home/{self.user}/.aws": "config  credentials",
+            f"/home/{self.user}/.ssh": "authorized_keys  id_ed25519  id_ed25519.pub  known_hosts",
         }
         return listing.get(target.rstrip("/"), f"ls: cannot access '{target}': No such file or directory")
 
@@ -164,6 +237,13 @@ class FakeShell:
                 "root:x:0:0:root:/root:/bin/bash\nsshd:x:110:65534::/run/sshd:/usr/sbin/nologin\n"
                 f"{self.user}:x:1001:1001::/home/{self.user}:/bin/bash\n{users}"
             ), 0
+        if f == "/etc/os-release":
+            return (
+                'PRETTY_NAME="Ubuntu 22.04.4 LTS"\nNAME="Ubuntu"\nVERSION_ID="22.04"\n'
+                'VERSION="22.04.4 LTS (Jammy Jellyfish)"\nID=ubuntu\nID_LIKE=debian'
+            ), 0
+        if f == "/etc/hostname":
+            return self.host, 0
         if f == "/etc/shadow":
             return f"cat: {f}: Permission denied", 1
         if f == "/etc/hosts":

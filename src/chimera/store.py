@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -151,6 +151,24 @@ class Store:
                 )
             )
         return out
+
+    # -- retention ---------------------------------------------------------
+    async def prune(self, retention_days: int, max_events: int, canary_days: int, max_canaries: int) -> None:
+        """Bound disk use: drop old rows and cap table sizes (oldest first)."""
+        now = datetime.now(UTC)
+        ev_cut = (now - timedelta(days=retention_days)).isoformat()
+        cn_cut = (now - timedelta(days=canary_days)).isoformat()
+        await self._run("DELETE FROM events WHERE ts < ?", (ev_cut,))
+        await self._run(
+            "DELETE FROM events WHERE id IN (SELECT id FROM events ORDER BY ts DESC LIMIT -1 OFFSET ?)", (max_events,)
+        )
+        await self._run("DELETE FROM sessions WHERE last_seen < ?", (ev_cut,))
+        await self._run("DELETE FROM canaries WHERE issued_at < ?", (cn_cut,))
+        await self._run(
+            "DELETE FROM canaries WHERE canary_id IN (SELECT canary_id FROM canaries ORDER BY issued_at DESC"
+            " LIMIT -1 OFFSET ?)",
+            (max_canaries,),
+        )
 
     # -- canaries ----------------------------------------------------------
     async def add_canary(self, rec: CanaryRecord) -> None:

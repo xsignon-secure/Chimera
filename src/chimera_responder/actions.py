@@ -73,7 +73,10 @@ class Actions:
         """Best-effort analyst notification to Slack / Discord incoming webhooks."""
         targets = [
             (self.s.slack_webhook_url, {"text": text}),
-            (self.s.discord_webhook_url, {"content": text.replace("*", "**")[:1900]}),
+            (
+                self.s.discord_webhook_url,
+                {"content": text.replace("*", "**")[:1900], "allowed_mentions": {"parse": []}},
+            ),
         ]
         async with self.guard.client(timeout=5.0) as client:
             for url, payload in targets:

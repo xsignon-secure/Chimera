@@ -159,8 +159,13 @@ def fingerprint(
     prose_args: bool = False,
 ) -> AgentFingerprint:
     """Classify the caller. Signals are recorded so analysts can see *why*."""
-    name = str((client_info or {}).get("name") or "")
-    version = str((client_info or {}).get("version") or "") or None
+    # Every field here is attacker-controlled: clip it before it reaches any sink.
+    info = client_info if isinstance(client_info, dict) else {}
+    name = str(info.get("name") or "")[:128]
+    version = str(info.get("version") or "")[:64] or None
+    user_agent = user_agent[:256] if user_agent else user_agent
+    protocol_version = str(protocol_version)[:32] if protocol_version else None
+    capabilities = capabilities if isinstance(capabilities, dict) else {}
     ua = (user_agent or "").lower()
     lname = name.lower()
     signals: list[str] = []
@@ -185,7 +190,7 @@ def fingerprint(
     elif any(k in ua for k in _SCRIPTS):
         scores["script"] += 0.4
         signals.append(f"scripted user-agent ({ua[:40]})")
-    caps = sorted((capabilities or {}).keys())
+    caps = sorted(str(k)[:32] for k in list(capabilities.keys())[:16])
     if {"sampling", "elicitation", "roots"} & set(caps):
         scores["ai_agent"] += 0.2
         signals.append("advertises agent capabilities (" + ",".join(caps) + ")")

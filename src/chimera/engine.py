@@ -15,7 +15,7 @@ from typing import Any
 import anyio
 
 from chimera import __version__
-from chimera.canary import CanaryWatermarker
+from chimera.canary import CanaryHit, CanaryWatermarker
 from chimera.config import Settings
 from chimera.detect import (
     RECON_ATTACK,
@@ -54,6 +54,8 @@ class Engine:
         load()
         names = self.profile.tools or sorted(REGISTRY)
         self.tools = {n: REGISTRY[n] for n in names}
+        self.server_name = settings.server_name or self.profile.server_name
+        self.server_version = settings.server_version or self.profile.version
         # "Think time" between our last response and the caller's next request. Our own
         # injected latency is excluded, so pacing reflects the caller (LLM vs script).
         self._think: dict[str, deque[float]] = defaultdict(lambda: deque(maxlen=20))
@@ -64,6 +66,7 @@ class Engine:
         self._rng = random.Random()  # jitter only; not security sensitive
 
     async def start(self) -> None:
+        await self.telemetry.prune()
         await self.canaries.warm()
         await self.telemetry.start()
 
@@ -124,7 +127,8 @@ class Engine:
         if method.startswith("notifications/"):
             return await call_next(ctx)
 
-        tool_name = params.get("name") if method == "tools/call" else None
+        raw_name = params.get("name") if method == "tools/call" else None
+        tool_name = _clip(raw_name, 128) if raw_name is not None else None
         arguments = params.get("arguments") if isinstance(params.get("arguments"), dict) else None
         state = await self.store.load_state(session_id)
         state["_tool"] = tool_name or ""
@@ -133,7 +137,7 @@ class Engine:
 
         # Did a previously issued canary come back?
         inbound_text = flatten(arguments) if arguments else ""
-        reused = self.canaries.scan(inbound_text)
+        reused = _attribute(self.canaries.hits(inbound_text), session_id)
 
         token = set_scope(scope)
         outcome: str = "success"
@@ -203,7 +207,7 @@ class Engine:
             source_ip=ip,
             source_port=port,
             transport=transport,  # type: ignore[arg-type]
-            method=method,
+            method=_clip(method, 64),
             tool=tool_name,
             arguments=_bounded(arguments),
             raw_params_sha256=hashlib.sha256(json.dumps(params, sort_keys=True, default=str).encode()).hexdigest(),
@@ -248,11 +252,13 @@ class Engine:
             self._prose_seen.clear()
             self._fingerprints.clear()
 
-    async def _emit_reuse(self, canary_ids: list[str], session_id: str, ip: str, tool: str | None) -> None:
-        for cid in canary_ids:
-            rec = await self.store.get_canary(cid)
-            origin = f"issued to session {rec.session_id} ({rec.source_ip}) by {rec.tool}" if rec else "unknown"
-            cross = rec is not None and rec.session_id != session_id
+    async def _emit_reuse(self, hits: list[CanaryHit], session_id: str, ip: str, tool: str | None) -> None:
+        for hit in hits:
+            rec = await self.store.get_canary(hit.canary_id)
+            origin = (
+                f"issued to session {hit.session_id} ({rec.source_ip if rec else '?'}) by {rec.tool if rec else '?'}"
+            )
+            cross = hit.session_id != session_id
             await self.telemetry.emit(
                 Event(
                     kind="canary.reused",
@@ -261,11 +267,11 @@ class Engine:
                     session_id=session_id,
                     source_ip=ip,
                     tool=tool,
-                    canary_ids=[cid],
+                    canary_ids=[hit.canary_id],
                     mitre_attack=["T1078"],
                     mitre_atlas=["AML.T0055"],
                     message=(
-                        f"stolen canary {cid} presented back to honeypot"
+                        f"stolen {hit.kind} canary {hit.canary_id} presented back to honeypot"
                         f"{' from a DIFFERENT session (credential sharing / lateral movement)' if cross else ''}"
                         f"; {origin}"
                     ),
@@ -279,10 +285,14 @@ class Engine:
             return False
         rec = await self.store.get_canary(cid)
         sid = rec.session_id if rec else "unknown"
+        # A link can be pasted anywhere: chat unfurl bots, mail scanners and colleagues fetch it
+        # too. A hit from the IP that stole it is strong evidence; from anywhere else it is
+        # context only (medium), so it can never on its own isolate an innocent fetcher.
+        same_thief = rec is not None and rec.source_ip == ip
         await self.telemetry.emit(
             Event(
                 kind="canary.triggered",
-                severity="critical",
+                severity="high" if same_thief else "medium",
                 profile=self.profile.key,
                 session_id=sid,
                 source_ip=ip,
@@ -293,7 +303,8 @@ class Engine:
                 mitre_attack=["T1078", "T1550"],
                 mitre_atlas=["AML.T0055"],
                 message=(
-                    f"URL canary {cid} opened from {ip} (UA: {headers.get('user-agent', '-')[:80]}); "
+                    f"URL canary {cid} opened from {ip} (UA: {_clip(headers.get('user-agent', '-'), 80)})"
+                    f"{'' if same_thief else ' - a different host than the thief (could be a link-preview bot)'}; "
                     f"originally issued to {rec.source_ip if rec else '?'} via {rec.tool if rec else '?'}"
                 ),
             )
@@ -336,6 +347,25 @@ class Engine:
         )
 
 
+def _clip(value: object, limit: int = 256) -> str:
+    text = str(value)
+    return text if len(text) <= limit else text[:limit] + "…"
+
+
+def _attribute(hits: list[CanaryHit], session_id: str) -> list[CanaryHit]:
+    """One hit per reused value, preferring the presenting session's own issuance.
+
+    An external Canarytokens key can be handed to several sessions once the pool
+    rotates; without this a session reusing its own key would be blamed on another.
+    """
+    chosen: dict[str, CanaryHit] = {}
+    for h in hits:
+        current_pick = chosen.get(h.marker)
+        if current_pick is None or (h.session_id == session_id and current_pick.session_id != session_id):
+            chosen[h.marker] = h
+    return sorted(chosen.values(), key=lambda h: h.canary_id)
+
+
 def _host(url: str) -> str:
     return url.split("://", 1)[-1].split("/", 1)[0].split(":", 1)[0]
 
@@ -351,13 +381,22 @@ def _is_error(result: Any) -> bool:
     return False
 
 
-def _bounded(arguments: dict[str, Any] | None, limit: int = 4096) -> dict[str, object] | None:
+def _bounded(arguments: dict[str, Any] | None, per_value: int = 1024, total: int = 4096) -> dict[str, object] | None:
+    """Keep evidence useful but bounded: an attacker must not be able to fill the disk."""
     if arguments is None:
         return None
     out: dict[str, object] = {}
+    used = 0
     for k, v in list(arguments.items())[:32]:
-        s = v if isinstance(v, int | float | bool) or v is None else str(v)
-        out[str(k)[:128]] = s[:limit] if isinstance(s, str) else s
+        val: object = v if isinstance(v, int | float | bool) or v is None else str(v)
+        if isinstance(val, str):
+            budget = max(0, min(per_value, total - used))
+            val = val if len(val) <= budget else val[:budget] + f"…[{len(str(v))} chars]"
+            used += len(val)
+        out[_clip(k, 64)] = val
+        if used >= total:
+            out["_truncated"] = True
+            break
     return out
 
 

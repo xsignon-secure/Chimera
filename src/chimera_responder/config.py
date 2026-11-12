@@ -35,6 +35,10 @@ class ResponderSettings(BaseModel):
     """Token for the blocklist feed (``/feeds/blocklist.txt?token=...``). Empty disables the feed."""
     protected_networks: list[str] = Field(default_factory=lambda: ["127.0.0.0/8", "::1/128"])
     """Addresses that must never be isolated (gateways, DNS, the SIEM itself...)."""
+    alerts_only_networks: list[str] = Field(default_factory=list)
+    """Source networks (e.g. the honeypot's alerts subnet) that may only POST /api/alerts.
+    Requests from them to the dashboard, MCP endpoint or feed get 404, so a compromised
+    honeypot cannot reach the Blue Team console."""
     max_isolations_per_hour: int = 10
     actions: list[str] = Field(default_factory=lambda: ["blocklist"])
     """Any of: blocklist, webhook, wazuh."""
@@ -53,8 +57,11 @@ class ResponderSettings(BaseModel):
 
     @model_validator(mode="after")
     def _check(self) -> ResponderSettings:
-        for cidr in self.protected_networks:
+        for cidr in (*self.protected_networks, *self.alerts_only_networks):
             ipaddress.ip_network(cidr, strict=False)
+        for name in ("honeypot_secret", "admin_password", "mcp_token", "feed_token", "action_webhook_secret"):
+            if "change-me" in getattr(self, name).lower():
+                raise ValueError(f"RESPONDER_{name.upper()} still holds the placeholder from .env.example")
         unknown = set(self.actions) - {"blocklist", "webhook", "wazuh"}
         if unknown:
             raise ValueError(f"unknown actions: {sorted(unknown)}")
@@ -108,6 +115,8 @@ class ResponderSettings(BaseModel):
             v["protected_networks"] = ["127.0.0.0/8", "::1/128"] + [
                 a.strip() for a in _env("PROTECTED_NETWORKS").split(",") if a.strip()
             ]
+        if _env("ALERTS_ONLY_NETWORKS"):
+            v["alerts_only_networks"] = [a.strip() for a in _env("ALERTS_ONLY_NETWORKS").split(",") if a.strip()]
         if _env("WAZUH_VERIFY_TLS"):
             v["wazuh_verify_tls"] = _env("WAZUH_VERIFY_TLS").lower() in {"1", "true", "yes"}
         return cls.model_validate(v)

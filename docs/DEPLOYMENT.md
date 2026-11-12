@@ -14,6 +14,7 @@ Paste the three generated lines into `.env`, then set:
 * `RESPONDER_ADMIN_PASSWORD`: the dashboard login (user `admin`).
 * `CHIMERA_PUBLIC_BASE_URL`: the URL attackers use to reach the decoy, e.g. `http://mcp-aws-prod.corp.example:8000`. URL canaries are built from it.
 * `CHIMERA_PROFILE`: `aws-prod-root`, `internal-admin` or `full`.
+* `CHIMERA_SERVER_NAME` (recommended): a name that fits your company, e.g. `acme-prod-iam-broker`. A unique name means attackers cannot recognise your decoy from a public list.
 * `RESPONDER_PROTECTED_NETWORKS`: gateways, DNS, domain controllers, jump hosts, the SIEM, and any NAT egress addresses.
 
 ## 2. (Optional) real Canarytokens
@@ -45,7 +46,7 @@ Behind a TLS-inspecting corporate proxy, build with its CA: `docker build --secr
 A honeypot only works if attackers find it. Make it findable the way a real internal server would be:
 
 * Register it in your internal MCP registry or gateway under its profile name.
-* Add a `.mcp.json` or `claude_desktop_config.json` entry pointing at it in a repo, wiki page or shared drive an intruder would browse. The file is itself a breadcrumb.
+* Add a `.mcp.json` or `claude_desktop_config.json` entry pointing at it in a repo, wiki page or shared drive an intruder would browse. The file is itself a breadcrumb. Generate it with `docker compose exec honeypot chimera bait > .mcp.json` (`--format cursor` or `--format vscode` for other clients).
 * Create a DNS name such as `mcp-aws-prod.corp.example`.
 * Keep it out of the configs of legitimate agents and users.
 
@@ -70,4 +71,5 @@ Start with `RESPONDER_MODE=approve`, or `dry_run` for a week of observation. Mov
 * **Backups:** back up the `honeypot-data` and `responder-data` volumes (SQLite and JSONL).
 * **Upgrades:** run `git pull && docker compose up -d --build`. The data stays on the volumes.
 * **Testing:** `claude mcp add --transport http decoy http://<host>:8000/mcp`, then ask the agent for the break-glass password. An incident should appear within seconds.
-* **Kubernetes:** run the same image. Give the honeypot pod a `NetworkPolicy` that denies all egress except to the responder service on port 9000, and allows ingress only from your ingress controller.
+* **Kubernetes:** run the same image. Give the honeypot pod a `NetworkPolicy` that denies all egress except to the responder service on port 9000, and allows ingress only from your ingress controller. Set `RESPONDER_ALERTS_ONLY_NETWORKS` to the honeypot pod CIDR, and pass the honeypot only its `CHIMERA_*` variables.
+* **IPv6:** publish the decoy on IPv4. Docker forwards IPv6 clients from the edge gateway address, which hides the attacker's real IP.
