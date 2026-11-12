@@ -31,6 +31,7 @@ from pydantic import BaseModel, Field
 
 from chimera.config import SEVERITY_RANK
 from chimera.models import Event
+from chimera.telemetry import chat_escape
 from chimera_responder.actions import ActionResult, Actions
 from chimera_responder.config import ResponderSettings
 
@@ -108,6 +109,11 @@ class IncidentStore:
     async def audit(self, incident: str, actor: str, action: str, detail: str = "") -> None:
         await self.q("INSERT INTO audit VALUES (?,?,?,?,?)", (_now().isoformat(), incident, actor, action, detail))
 
+    async def count_actions(self, action: str, seconds: int) -> int:
+        since = datetime.fromtimestamp(time.time() - seconds, UTC).isoformat()
+        rows = await self.q("SELECT COUNT(*) FROM audit WHERE action=? AND ts >= ?", (action, since))
+        return int(rows[0][0])
+
     async def audit_log(self, limit: int = 200) -> list[dict[str, str]]:
         rows = await self.q("SELECT ts, incident, actor, action, detail FROM audit ORDER BY ts DESC LIMIT ?", (limit,))
         return [dict(zip(("ts", "incident", "actor", "action", "detail"), r, strict=True)) for r in rows]
@@ -124,7 +130,6 @@ class Responder:
         self.store = store or IncidentStore(settings.data_dir / "responder.db")
         self.actions = actions or Actions(settings)
         self._protected = [ipaddress.ip_network(c, strict=False) for c in settings.protected_networks]
-        self._recent_isolations: list[float] = []
         self._lock = anyio.Lock()
 
     def is_protected(self, ip: str) -> bool:
@@ -151,11 +156,32 @@ class Responder:
                 await self.store.audit(inc.id, "system", "opened", f"first alert {event.kind} from {inc.source_ip}")
             before = inc.status
             _fold(inc, event)
+            await self._maybe_reopen(inc, event)
             await self._evaluate(inc)
             await self.store.save(inc)
         if inc.status != before:
             await self._notify(inc)
         return inc
+
+    async def _maybe_reopen(self, inc: Incident, event: Event) -> None:
+        """New qualifying activity after a decision puts the incident back in play.
+
+        Released / failed: any event at the trigger level. Rejected (an analyst said
+        "false positive"): only a critical event. Dry-run: only once the responder is
+        no longer in dry-run mode.
+        """
+        sev = SEVERITY_RANK.get(event.severity, 0)
+        trig = SEVERITY_RANK[self.settings.trigger_severity]
+        reopen = (
+            (inc.status in {"released", "failed"} and sev >= trig)
+            or (inc.status == "rejected" and event.severity == "critical")
+            or (inc.status == "dry_run" and self.settings.mode != "dry_run" and sev >= trig)
+        )
+        if reopen:
+            await self.store.audit(
+                inc.id, "system", "reopened", f"new {event.severity} {event.kind} after status {inc.status}"
+            )
+            inc.status = "monitoring"
 
     async def _evaluate(self, inc: Incident) -> None:
         if SEVERITY_RANK.get(inc.severity, 0) < SEVERITY_RANK[self.settings.trigger_severity]:
@@ -186,9 +212,10 @@ class Responder:
             await self._isolate(inc, actor="auto")
 
     async def _isolate(self, inc: Incident, actor: str) -> None:
-        now = time.time()
-        self._recent_isolations = [t for t in self._recent_isolations if now - t < 3600]
-        if len(self._recent_isolations) >= self.settings.max_isolations_per_hour:
+        # Counted from the audit log, so a responder restart cannot reset the cap.
+        recent = await self.store.count_actions("isolate", seconds=3600)
+        # Humans on the dashboard are not capped; automation (auto mode, agents) is.
+        if not actor.startswith("analyst") and recent >= self.settings.max_isolations_per_hour:
             inc.status = "pending_approval"
             await self.store.audit(
                 inc.id,
@@ -197,7 +224,6 @@ class Responder:
                 f"hourly cap {self.settings.max_isolations_per_hour} reached; needs approval",
             )
             return
-        self._recent_isolations.append(now)
         results: list[ActionResult] = await self.actions.isolate(inc.source_ip, inc.id, _context(inc))
         for r in results:
             inc.actions.append({"ts": _now().isoformat(), "action": r.name, "ok": r.ok, "detail": r.detail})
@@ -219,7 +245,8 @@ class Responder:
         }.get(inc.status, inc.status)
         text = (
             f"*[{inc.severity.upper()}] MCP honeypot incident {inc.id}*: `{inc.source_ip}` {verb}.\n"
-            f"Tools: {', '.join(inc.tools[:5]) or '-'} | Client: {', '.join(inc.clients[:2]) or '-'}\n"
+            f"Tools: {chat_escape(', '.join(inc.tools[:5]) or '-')} | "
+            f"Client: {chat_escape(', '.join(inc.clients[:2]) or '-')}\n"
             f"{self.settings.public_url.rstrip('/')}/incidents/{inc.id}"
         )
         await self.actions.notify(text)
@@ -229,7 +256,7 @@ class Responder:
             inc = await self.store.get(incident_id)
             if inc is None:
                 raise KeyError(incident_id)
-            if nonce is not None and not secrets.compare_digest(nonce, inc.approval_nonce):
+            if nonce is not None and not secrets.compare_digest(nonce.encode(), inc.approval_nonce.encode()):
                 raise PermissionError("stale or invalid approval token")
             if inc.status not in {"pending_approval", "dry_run", "monitoring", "failed", "released"}:
                 raise ValueError(f"cannot isolate an incident in state {inc.status}")
@@ -246,6 +273,8 @@ class Responder:
             inc = await self.store.get(incident_id)
             if inc is None:
                 raise KeyError(incident_id)
+            if inc.status == "isolated":
+                raise ValueError("incident is isolated: release it first, then dismiss")
             inc.status = "rejected"
             inc.updated = _now()
             await self.store.audit(inc.id, actor, "rejected", reason[:500])
@@ -257,6 +286,8 @@ class Responder:
             inc = await self.store.get(incident_id)
             if inc is None:
                 raise KeyError(incident_id)
+            if inc.status not in {"isolated", "failed"}:
+                raise ValueError(f"nothing to release: incident is {inc.status}")
             results = await self.actions.release(inc.source_ip, inc.id)
             for r in results:
                 inc.actions.append(

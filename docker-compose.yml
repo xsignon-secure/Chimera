@@ -30,7 +30,7 @@ services:
     tmpfs: ["/tmp:size=32m"]
     cap_add: [CHOWN, SETUID, SETGID]
     networks:
-      edge: {}
+      edge: { ipv4_address: 172.30.0.2 }
       decoy: { ipv4_address: 172.30.10.2 }
     depends_on: [honeypot]
     mem_limit: 128m
@@ -41,17 +41,32 @@ services:
     build: .
     image: chimera:1.0.0
     command: ["serve"]
-    env_file: .env
+    # No env_file on purpose: the honeypot is the component attackers touch, so it
+    # receives only its own CHIMERA_* settings and never the responder's secrets.
     environment:
       CHIMERA_TRUSTED_PROXIES: 172.30.10.2/32
       CHIMERA_WEBHOOK_URL: http://responder:9000/api/alerts
       CHIMERA_WEBHOOK_SECRET: ${CHIMERA_WEBHOOK_SECRET:?set CHIMERA_WEBHOOK_SECRET in .env}
+      CHIMERA_PUBLIC_BASE_URL: ${CHIMERA_PUBLIC_BASE_URL:?set CHIMERA_PUBLIC_BASE_URL in .env (the URL attackers use)}
+      CHIMERA_SEED: ${CHIMERA_SEED:-}
+      CHIMERA_CANARY_SECRET: ${CHIMERA_CANARY_SECRET:-}
+      CHIMERA_PROFILE: ${CHIMERA_PROFILE:-aws-prod-root}
+      CHIMERA_SERVER_NAME: ${CHIMERA_SERVER_NAME:-}
+      CHIMERA_SERVER_VERSION: ${CHIMERA_SERVER_VERSION:-}
+      CHIMERA_ALERT_MIN_SEVERITY: ${CHIMERA_ALERT_MIN_SEVERITY:-medium}
+      CHIMERA_CANARYTOKENS_FILE: ${CHIMERA_CANARYTOKENS_FILE:-}
+      CHIMERA_SYSLOG_TARGET: ${CHIMERA_SYSLOG_TARGET:-}
+      CHIMERA_SLACK_WEBHOOK_URL: ${CHIMERA_SLACK_WEBHOOK_URL:-}
+      CHIMERA_DISCORD_WEBHOOK_URL: ${CHIMERA_DISCORD_WEBHOOK_URL:-}
+      CHIMERA_EGRESS_ALLOWLIST: ${CHIMERA_EGRESS_ALLOWLIST:-}
+      CHIMERA_RETENTION_DAYS: ${CHIMERA_RETENTION_DAYS:-}
+      CHIMERA_MAX_EVENTS: ${CHIMERA_MAX_EVENTS:-}
       HEALTH_PORT: "8000"
     volumes: ["honeypot-data:/data"]
     tmpfs: ["/tmp:size=16m"]
     networks:
       decoy: { ipv4_address: 172.30.10.10 }
-      alerts: {}
+      alerts: { ipv4_address: 172.30.20.10 }
     mem_limit: 256m
     cpus: 1.0
 
@@ -63,6 +78,12 @@ services:
     env_file: .env
     environment:
       RESPONDER_HONEYPOT_SECRET: ${CHIMERA_WEBHOOK_SECRET}
+      # The honeypot's subnet may only POST alerts: no dashboard, MCP or feed access.
+      RESPONDER_ALERTS_ONLY_NETWORKS: 172.30.20.0/24
+      # Docker's own subnets are never isolated. Clients arriving over IPv6, or through
+      # docker-proxy, show up as the edge gateway (172.30.0.1); isolating it would cut
+      # off everyone. Publish over IPv4 with iptables NAT (Docker's default) for real IPs.
+      RESPONDER_PROTECTED_NETWORKS: 172.30.0.0/24,172.30.10.0/24,172.30.20.0/24,${RESPONDER_PROTECTED_NETWORKS:-}
       HEALTH_PORT: "9000"
     volumes: ["responder-data:/data"]
     tmpfs: ["/tmp:size=16m"]
@@ -75,12 +96,14 @@ services:
     cpus: 0.5
 
 networks:
-  edge: {}                 # ingress only: published port
+  edge:                    # ingress only: published port
+    ipam: { config: [{ subnet: 172.30.0.0/24 }] }
   decoy:                   # proxy <-> honeypot, no outside route
     internal: true
     ipam: { config: [{ subnet: 172.30.10.0/24 }] }
   alerts:                  # honeypot -> responder, no outside route
     internal: true
+    ipam: { config: [{ subnet: 172.30.20.0/24 }] }
   soc: {}                  # responder -> your SOAR / Wazuh / Slack
 
 volumes:

@@ -72,6 +72,17 @@ class Settings(BaseModel):
 
     alert_min_severity: Severity = "medium"
 
+    # Retention (bounded disk use)
+    retention_days: int = 90
+    max_events: int = 2_000_000
+    canary_retention_days: int = 180
+    max_canaries: int = 500_000
+
+    # Per-install identity: override the profile's advertised server name / version so
+    # deployments never share a fingerprint.
+    server_name: str = ""
+    server_version: str = ""
+
     # Deception behaviour
     latency_min_ms: int = 120
     latency_max_ms: int = 900
@@ -89,6 +100,13 @@ class Settings(BaseModel):
         for cidr in value:
             ipaddress.ip_network(cidr, strict=False)
         return value
+
+    @model_validator(mode="after")
+    def _reject_placeholders(self) -> Settings:
+        for name in ("webhook_secret", "seed", "canary_secret"):
+            if "change-me" in getattr(self, name):
+                raise ValueError(f"CHIMERA_{name.upper()} still has its placeholder value; generate a real secret")
+        return self
 
     @model_validator(mode="after")
     def _derive_allowlist(self) -> Settings:
@@ -128,6 +146,8 @@ class Settings(BaseModel):
             "alert_min_severity": "ALERT_MIN_SEVERITY",
             "persona_llm_url": "PERSONA_LLM_URL",
             "persona_llm_model": "PERSONA_LLM_MODEL",
+            "server_name": "SERVER_NAME",
+            "server_version": "SERVER_VERSION",
         }
         for field, env in mapping.items():
             raw = _env(env)
@@ -138,6 +158,10 @@ class Settings(BaseModel):
             "latency_min_ms": "LATENCY_MIN_MS",
             "latency_max_ms": "LATENCY_MAX_MS",
             "rate_limit_per_minute": "RATE_LIMIT_PER_MINUTE",
+            "retention_days": "RETENTION_DAYS",
+            "max_events": "MAX_EVENTS",
+            "canary_retention_days": "CANARY_RETENTION_DAYS",
+            "max_canaries": "MAX_CANARIES",
         }.items():
             raw = _env(env)
             if raw:

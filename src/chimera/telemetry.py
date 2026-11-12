@@ -28,6 +28,10 @@ from chimera.store import Store
 
 log = logging.getLogger("chimera.telemetry")
 
+WEBHOOK_MAX_BYTES = 64 * 1024
+JSONL_MAX_BYTES = 50 * 1024 * 1024
+JSONL_KEEP = 5
+
 _CEF_SEV = {"info": 1, "low": 3, "medium": 5, "high": 8, "critical": 10}
 
 
@@ -62,23 +66,34 @@ def to_cef(event: Event, version: str) -> str:
     )
 
 
+def chat_escape(value: object, limit: int = 200) -> str:
+    """Neutralise attacker text for Slack mrkdwn / Discord: no links, mentions or formatting."""
+    text = str(value)[:limit]
+    text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    text = text.replace("@", "@\u200b").replace("`", "'").replace("*", "").replace("_", " ").replace("~", "")
+    return text.replace("\n", " ")
+
+
 def chat_text(event: Event) -> str:
     fp = event.fingerprint
-    who = f"{fp.client_name or 'unknown client'} ({fp.classification})" if fp else "unknown client"
+    who = f"{chat_escape(fp.client_name or 'unknown client', 80)} ({fp.classification})" if fp else "unknown client"
     lines = [
         f"*[{event.severity.upper()}] MCP honeypot: {event.kind}*",
         f"Source: `{event.source_ip}`  Session: `{event.session_id}`  Client: {who}",
     ]
     if event.tool:
-        lines.append(f"Tool: `{event.tool}`  Outcome: {event.outcome}")
+        lines.append(f"Tool: `{chat_escape(event.tool, 80)}`  Outcome: {event.outcome}")
     if event.mitre_attack or event.mitre_atlas:
         lines.append("MITRE: " + ", ".join(event.mitre_attack + event.mitre_atlas))
     if event.canary_ids:
         lines.append("Canaries: " + ", ".join(event.canary_ids[:6]))
     if event.indicators and event.indicators.urls:
-        lines.append("IOCs: " + ", ".join(event.indicators.urls[:5]))
+        lines.append(
+            "IOCs (defanged): "
+            + ", ".join(chat_escape(u.replace("://", "[:]//"), 120) for u in event.indicators.urls[:5])
+        )
     if event.message:
-        lines.append(event.message[:300])
+        lines.append(chat_escape(event.message, 300))
     return "\n".join(lines)
 
 
@@ -98,6 +113,11 @@ class Telemetry:
             self._syslog = (host, int(port or 514))
         self.sent_ok = 0
         self.sent_failed = 0
+        self._since_prune = 0
+
+    async def prune(self) -> None:
+        st = self.settings
+        await self.store.prune(st.retention_days, st.max_events, st.canary_retention_days, st.max_canaries)
 
     @property
     def remote_enabled(self) -> bool:
@@ -120,6 +140,10 @@ class Telemetry:
 
     async def emit(self, event: Event) -> None:
         await self.store.add_event(event)
+        self._since_prune += 1
+        if self._since_prune >= 1000:
+            self._since_prune = 0
+            await self.prune()
         line = event.model_dump_json()
         await anyio.to_thread.run_sync(self._append, line)
         if self.settings.log_stdout:
@@ -131,6 +155,15 @@ class Telemetry:
                 log.warning("alert queue full; dropping remote alert %s", event.id)
 
     def _append(self, line: str) -> None:
+        try:
+            if self._jsonl.exists() and self._jsonl.stat().st_size > JSONL_MAX_BYTES:
+                for i in range(JSONL_KEEP - 1, 0, -1):
+                    older = self._jsonl.with_name(f"{self._jsonl.name}.{i}")
+                    if older.exists():
+                        older.replace(self._jsonl.with_name(f"{self._jsonl.name}.{i + 1}"))
+                self._jsonl.replace(self._jsonl.with_name(f"{self._jsonl.name}.1"))
+        except OSError:
+            pass
         with self._jsonl.open("a", encoding="utf-8") as fh:
             fh.write(line + "\n")
 
@@ -148,15 +181,25 @@ class Telemetry:
         s = self.settings
         body = event.model_dump_json().encode()
         if s.webhook_url:
+            if len(body) > WEBHOOK_MAX_BYTES:
+                body = event.compact().model_dump_json().encode()
             headers = {"Content-Type": "application/json", "User-Agent": f"chimera/{self.version}"}
             if s.webhook_secret:
                 headers.update(sign(s.webhook_secret, body))
-            await self._post(client, s.webhook_url, content=body, headers=headers)
+            status = await self._post(client, s.webhook_url, content=body, headers=headers)
+            if status == 413:  # never silently drop a containment signal
+                small = event.compact().model_dump_json().encode()
+                headers = {"Content-Type": "application/json", "User-Agent": f"chimera/{self.version}"}
+                if s.webhook_secret:
+                    headers.update(sign(s.webhook_secret, small))
+                await self._post(client, s.webhook_url, content=small, headers=headers)
         if s.slack_webhook_url:
             await self._post(client, s.slack_webhook_url, json={"text": chat_text(event)})
         if s.discord_webhook_url:
             await self._post(
-                client, s.discord_webhook_url, json={"content": chat_text(event).replace("*", "**")[:1900]}
+                client,
+                s.discord_webhook_url,
+                json={"content": chat_text(event).replace("*", "**")[:1900], "allowed_mentions": {"parse": []}},
             )
         if self._syslog:
             msg = (
@@ -165,25 +208,29 @@ class Telemetry:
             )
             await anyio.to_thread.run_sync(self._send_udp, msg.encode()[:8192])
 
-    async def _post(self, client: httpx.AsyncClient, url: str, **kwargs: Any) -> None:
+    async def _post(self, client: httpx.AsyncClient, url: str, **kwargs: Any) -> int:
+        """POST with retries on 5xx/network errors. Returns the final HTTP status (0 = no response)."""
+        status = 0
         for attempt in range(3):
             try:
                 resp = await client.post(url, **kwargs)
-                if resp.status_code < 500:
-                    if resp.status_code >= 400:
-                        log.warning("alert sink %s rejected event: HTTP %s", httpx.URL(url).host, resp.status_code)
+                status = resp.status_code
+                if status < 500:
+                    if status >= 400:
+                        log.warning("alert sink %s rejected event: HTTP %s", httpx.URL(url).host, status)
                         self.sent_failed += 1
                     else:
                         self.sent_ok += 1
-                    return
+                    return status
             except PermissionError as exc:
                 log.error("%s", exc)
                 self.sent_failed += 1
-                return
+                return 0
             except httpx.HTTPError as exc:
                 log.warning("alert sink error (%s), attempt %d", type(exc).__name__, attempt + 1)
             await asyncio.sleep(0.5 * 2**attempt)
         self.sent_failed += 1
+        return status
 
     def _send_udp(self, payload: bytes) -> None:
         assert self._syslog is not None

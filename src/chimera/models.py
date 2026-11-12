@@ -74,6 +74,19 @@ class Event(BaseModel):
     persona: str | None = None
     message: str = ""
 
+    def compact(self) -> Event:
+        """A small copy that always fits a sink's size limit (keeps the decision-relevant fields)."""
+        fp = self.fingerprint.model_copy(update={"signals": self.fingerprint.signals[:5]}) if self.fingerprint else None
+        return self.model_copy(
+            update={
+                "arguments": {"_omitted": "too large; see local events.jsonl"} if self.arguments else None,
+                "response_summary": None,
+                "fingerprint": fp,
+                "indicators": None,
+                "message": self.message[:500],
+            }
+        )
+
 
 class CanaryRecord(BaseModel):
     canary_id: str

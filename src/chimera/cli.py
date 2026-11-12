@@ -1,4 +1,4 @@
-"""Command line entry point: ``chimera serve | sessions | export-stix | canaries``."""
+"""Command line entry point: ``chimera serve | sessions | export-stix | canaries | bait``."""
 
 from __future__ import annotations
 
@@ -43,7 +43,7 @@ def _serve(args: argparse.Namespace) -> None:
 
     app = create_app(settings)
     print(
-        f"Chimera {__version__} serving profile '{settings.profile}' as '{app.engine.profile.server_name}' "
+        f"Chimera {__version__} serving profile '{settings.profile}' as '{app.engine.server_name}' "
         f"on {settings.host}:{settings.port}{settings.mcp_path}",
         file=sys.stderr,
     )
@@ -94,6 +94,26 @@ def _canaries(_: argparse.Namespace) -> None:
         )
 
 
+def bait_config(name: str, url: str, fmt: str) -> dict[str, object]:
+    """An MCP client config that points at the decoy, to plant where an intruder will look."""
+    if fmt == "vscode":
+        return {"servers": {name: {"type": "http", "url": url}}}
+    return {"mcpServers": {name: {"type": "http", "url": url}}}
+
+
+def _bait(args: argparse.Namespace) -> None:
+    from chimera.profiles import PROFILES as profiles
+
+    settings = Settings.from_env()
+    if args.profile:
+        settings.profile = args.profile
+    if "localhost" in settings.public_base_url or "127.0.0.1" in settings.public_base_url:
+        print("warning: CHIMERA_PUBLIC_BASE_URL points at localhost; set the URL attackers will use", file=sys.stderr)
+    name = settings.server_name or profiles[settings.profile].server_name
+    url = settings.public_base_url.rstrip("/") + settings.mcp_path
+    print(json.dumps(bait_config(name, url, args.format), indent=2))
+
+
 def main(argv: list[str] | None = None) -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s", stream=sys.stderr)
     logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -110,6 +130,10 @@ def main(argv: list[str] | None = None) -> None:
     exp.add_argument("session_id")
     exp.set_defaults(func=_export)
     sub.add_parser("canaries", help="list issued canaries").set_defaults(func=_canaries)
+    bait = sub.add_parser("bait", help="print an .mcp.json breadcrumb that points at the decoy")
+    bait.add_argument("--format", choices=["claude", "cursor", "vscode"], default="claude")
+    bait.add_argument("--profile", choices=sorted(PROFILES))
+    bait.set_defaults(func=_bait)
     args = parser.parse_args(argv)
     args.func(args)
 

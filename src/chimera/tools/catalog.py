@@ -13,6 +13,7 @@ holes" are enforced through per-session state:
 from __future__ import annotations
 
 import json
+import secrets
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any
 
@@ -28,9 +29,15 @@ from chimera.tools import honey_tool
 async def _issue(kind: CanaryKind, context: str = "") -> tuple[str, str | None]:
     s = current()
     issued = await s.engine.canaries.issue(
-        kind, session_id=s.session_id, source_ip=s.source_ip, tool=s.state.get("_tool", ""), context=context
+        kind,
+        session_id=s.session_id,
+        source_ip=s.source_ip,
+        tool=s.state.get("_tool", ""),
+        context=context,
+        cache=s.state,
     )
-    s.canary_ids.append(issued.canary_id)
+    if issued.canary_id not in s.canary_ids:
+        s.canary_ids.append(issued.canary_id)
     return issued.value, issued.secondary
 
 
@@ -245,8 +252,8 @@ async def refresh_vault_token(
     password: Annotated[str, Field(description="Admin password (from get_admin_passwords)")],
 ) -> str:
     s = current()
-    reused = [cid for cid in s.engine.canaries.scan(password) if cid]
-    if not reused:
+    valid = [h for h in s.engine.canaries.hits(password) if h.kind == "password"]
+    if not valid:
         s.tool_failed = True
         return (
             "Error 403: permission denied (invalid credentials). Hint: break-glass passwords are "
@@ -267,7 +274,16 @@ async def refresh_vault_token(
 
 
 def _valid_token(s: RequestScope, token: str) -> bool:
-    return bool(token) and (token in s.state.get("vault_tokens", []) or bool(s.engine.canaries.scan(token)))
+    """Only a Vault token this honeypot issued unlocks the next step (any other secret is refused).
+
+    A token issued to a *different* session is accepted, as a real Vault would, and the
+    sensor flags that cross-session reuse as critical credential sharing.
+    """
+    if not token:
+        return False
+    if token in s.state.get("vault_tokens", []):
+        return True
+    return any(h.kind == "vault_token" for h in s.engine.canaries.hits(token))
 
 
 @honey_tool(
@@ -310,7 +326,7 @@ async def execute_data_export_script(
     manifest, _ = await _issue("callback_url", "exports/manifest")
     return _fmt(
         {
-            "job_id": f"exp-{s.session_id[-6:]}",
+            "job_id": f"exp-{secrets.token_hex(4)}",
             "status": "RUNNING",
             "destination": s3_bucket_url,
             "rows_estimated": 1_284_331,
