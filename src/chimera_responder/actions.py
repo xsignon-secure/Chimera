@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from pathlib import Path
 from typing import Any
 
@@ -23,6 +24,25 @@ from chimera.signing import sign
 from chimera_responder.config import ResponderSettings
 
 log = logging.getLogger("chimera.responder.actions")
+
+
+def wazuh_timeout(command: str) -> int:
+    """Seconds after which Wazuh lifts a block, from a manager command name like ``firewall-drop3600``.
+
+    Wazuh names each timed ``<active-response>`` ``<command><timeout>`` (see the agent's
+    ``shared/ar.conf``). A ``!script`` command bypasses that config and never expires (0).
+    """
+    if command.startswith("!"):
+        return 0
+    digits = re.search(r"(\d+)$", command)
+    return int(digits.group(1)) if digits else 0
+
+
+def _wazuh_failure(item: dict[str, Any]) -> str:
+    ids = ", ".join(map(str, item.get("id", [])))[:60]
+    error = item.get("error")
+    message = str(error.get("message", "?")) if isinstance(error, dict) else "?"
+    return f"{ids}: {message[:80]}"
 
 
 class ActionResult(BaseModel):
@@ -62,12 +82,29 @@ class Actions:
             except httpx.HTTPError as exc:
                 out.append(ActionResult(name="webhook", ok=False, detail=str(exc)[:300]))
         if "wazuh" in self.s.actions:
-            out.append(
-                ActionResult(
-                    name="wazuh", ok=True, detail="Wazuh firewall-drop entries expire by their configured timeout"
-                )
-            )
+            out.append(self._wazuh_release(ip))
         return out
+
+    def _wazuh_release(self, ip: str) -> ActionResult:
+        """The Wazuh API cannot undo an active response; only the agent's own timeout can.
+
+        A manager-defined command such as ``firewall-drop3600`` (an ``<active-response>``
+        block with ``<timeout>3600</timeout>``) is removed by each agent when the timeout
+        ends. A bare script (``!firewall-drop``) never expires, so say so plainly.
+        """
+        timeout = wazuh_timeout(self.s.wazuh_command)
+        if timeout:
+            return ActionResult(
+                name="wazuh", ok=True, detail=f"Wazuh agents lift the block on {ip} automatically ({timeout}s timeout)"
+            )
+        return ActionResult(
+            name="wazuh",
+            ok=False,
+            detail=(
+                f"{self.s.wazuh_command} has no timeout, so the block on {ip} stays until removed on each agent "
+                f"(e.g. iptables -D INPUT -s {ip} -j DROP). Use a timed command such as firewall-drop3600."
+            ),
+        )
 
     async def notify(self, text: str) -> None:
         """Best-effort analyst notification to Slack / Discord incoming webhooks."""
@@ -145,7 +182,20 @@ class Actions:
             }
             resp = await client.put(f"{base}/active-response", params=params, json=body, headers=headers)
         detail = f"Wazuh active-response {self.s.wazuh_command} for {ip}: HTTP {resp.status_code}"
-        if resp.is_success:
-            affected = resp.json().get("data", {}).get("total_affected_items")
-            detail += f", agents affected: {affected}"
-        return ActionResult(name="wazuh", ok=resp.is_success, detail=detail)
+        affected = 0
+        try:
+            data = resp.json().get("data", {}) or {}
+        except ValueError:
+            data = {}
+        if isinstance(data, dict):
+            affected = int(data.get("total_affected_items") or 0)
+            ids = [i for i in data.get("affected_items", []) if isinstance(i, str)][:20]
+            detail += f", agents affected: {affected}" + (f" ({', '.join(ids)})" if ids else "")
+            failed = data.get("failed_items") or []
+            if failed:
+                reasons = sorted({_wazuh_failure(f) for f in failed[:5] if isinstance(f, dict)})
+                detail += f", failed: {data.get('total_failed_items', len(failed))} ({'; '.join(reasons)})"
+        timeout = wazuh_timeout(self.s.wazuh_command)
+        detail += f", auto-release after {timeout}s" if timeout else ", permanent until removed on the agents"
+        # HTTP 200 with zero affected agents means nothing was blocked: never report that as isolation.
+        return ActionResult(name="wazuh", ok=resp.is_success and affected > 0, detail=detail[:500])
