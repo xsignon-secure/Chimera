@@ -18,7 +18,7 @@ if [ -n "${DISCORD_WEBHOOK:-}" ]; then
 fi
 
 say "SSH key for maintenance (kept in Cloud Shell: ~/.ssh/chimera)"
-[ -f ~/.ssh/chimera ] || ssh-keygen -t ed25519 -N "" -f ~/.ssh/chimera -C chimera-admin >/dev/null
+[ -f ~/.ssh/chimera ] || ssh-keygen -t rsa -b 4096 -N "" -f ~/.ssh/chimera -C chimera-admin >/dev/null
 
 say "Network"
 VCN=$(q network vcn list --compartment-id "$C" --display-name "$NAME-vcn" --lifecycle-state AVAILABLE --query 'data[0].id')
