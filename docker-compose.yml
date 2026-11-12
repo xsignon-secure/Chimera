@@ -1,0 +1,88 @@
+# Project Chimera: production deployment.
+#
+#   internet / internal network ──► ingress (nginx) ──► honeypot ──► responder ──► SOAR / Wazuh / Slack
+#                                     :8000              (NO egress)   (allowlisted egress)
+#
+# The honeypot sits only on `internal: true` networks. Docker gives such networks
+# no route outside the host, so even a full compromise of the honeypot process
+# cannot reach the internet or your LAN: its only peers are the ingress proxy and
+# the responder. This is the "no pivot" guarantee, enforced by the network layer
+# and again in code (egress allowlist, no exec primitives).
+#
+# Usage:  cp .env.example .env && edit .env && docker compose up -d --build
+
+x-hardening: &hardening
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  pids_limit: 128
+  restart: unless-stopped
+  logging:
+    driver: json-file
+    options: { max-size: "20m", max-file: "5" }
+
+services:
+  ingress:
+    <<: *hardening
+    image: nginx:1.27-alpine
+    ports: ["${CHIMERA_LISTEN:-0.0.0.0}:${CHIMERA_PUBLIC_PORT:-8000}:8080"]
+    volumes: ["./deploy/nginx.conf:/etc/nginx/nginx.conf:ro"]
+    tmpfs: ["/tmp:size=32m"]
+    cap_add: [CHOWN, SETUID, SETGID]
+    networks:
+      edge: {}
+      decoy: { ipv4_address: 172.30.10.2 }
+    depends_on: [honeypot]
+    mem_limit: 128m
+    cpus: 0.5
+
+  honeypot:
+    <<: *hardening
+    build: .
+    image: chimera:1.0.0
+    command: ["serve"]
+    env_file: .env
+    environment:
+      CHIMERA_TRUSTED_PROXIES: 172.30.10.2/32
+      CHIMERA_WEBHOOK_URL: http://responder:9000/api/alerts
+      CHIMERA_WEBHOOK_SECRET: ${CHIMERA_WEBHOOK_SECRET:?set CHIMERA_WEBHOOK_SECRET in .env}
+      HEALTH_PORT: "8000"
+    volumes: ["honeypot-data:/data"]
+    tmpfs: ["/tmp:size=16m"]
+    networks:
+      decoy: { ipv4_address: 172.30.10.10 }
+      alerts: {}
+    mem_limit: 256m
+    cpus: 1.0
+
+  responder:
+    <<: *hardening
+    image: chimera:1.0.0
+    entrypoint: ["chimera-responder"]
+    command: []
+    env_file: .env
+    environment:
+      RESPONDER_HONEYPOT_SECRET: ${CHIMERA_WEBHOOK_SECRET}
+      HEALTH_PORT: "9000"
+    volumes: ["responder-data:/data"]
+    tmpfs: ["/tmp:size=16m"]
+    ports: ["${RESPONDER_LISTEN:-127.0.0.1}:${RESPONDER_PUBLIC_PORT:-9000}:9000"]
+    networks:
+      alerts: {}
+      soc: {}
+    depends_on: [honeypot]
+    mem_limit: 256m
+    cpus: 0.5
+
+networks:
+  edge: {}                 # ingress only: published port
+  decoy:                   # proxy <-> honeypot, no outside route
+    internal: true
+    ipam: { config: [{ subnet: 172.30.10.0/24 }] }
+  alerts:                  # honeypot -> responder, no outside route
+    internal: true
+  soc: {}                  # responder -> your SOAR / Wazuh / Slack
+
+volumes:
+  honeypot-data: {}
+  responder-data: {}
