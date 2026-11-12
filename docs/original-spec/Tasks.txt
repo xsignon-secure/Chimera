@@ -1,0 +1,35 @@
+
+***
+
+### 📄 5. Tasks.md (Execution Checklist for Claude Code)
+
+```markdown
+# Tasks: Build Execution Plan
+
+## Phase 1: Project Setup & Core MCP
+- [ ] Initialize Python project with `pyproject.toml` (dependencies: `mcp`, `pydantic`, `httpx`, `redis`).
+- [ ] Create the base MCP server entrypoint (`main.py`) using `mcp.server.stdio`.
+- [ ] Implement basic tool registration and JSON-RPC routing.
+
+## Phase 2: Deception Logic & State Machine
+- [ ] Implement the `SessionState` class to track multi-tool dependencies.
+- [ ] Build the `CanaryWatermarker` utility to inject unique IDs into all string outputs.
+- [ ] Implement Tool 1 (`get_internal_admin_credentials`) with state tracking.
+- [ ] Implement Tool 2 (`query_employee_aws_keys`) with watermarked outputs.
+- [ ] Implement Tool 3 (`execute_data_export_script`) with the prerequisite check logic.
+
+## Phase 3: Telemetry & MITRE Mapping
+- [ ] Create the `TelemetryLogger` class.
+- [ ] Implement the MITRE ATT&CK mapping dictionary for all tools.
+- [ ] Write the async webhook sender to push JSON payloads to the configured SIEM URL.
+- [ ] Ensure telemetry fires *before* the response is sent to the attacker.
+
+## Phase 4: Advanced Persona Engine (Optional/Phase 2)
+- [ ] Integrate a lightweight LLM wrapper (e.g., local Ollama or external API).
+- [ ] Create a prompt template that takes the attacker's input and generates a "flavored" text response.
+- [ ] Wrap the tool outputs with the persona engine.
+
+## Phase 5: Containerization & Security Hardening
+- [ ] Write the `Dockerfile` (Python 3.11-slim, read-only root).
+- [ ] Write `docker-compose.yml` with strict network egress rules (only allowing the SIEM IP).
+- [ ] Write `pytest` tests for the state machine and canary generation.

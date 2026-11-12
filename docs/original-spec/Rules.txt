@@ -1,0 +1,27 @@
+
+***
+
+### 📄 3. Rules.md (Strict Guidelines for the Coding AI)
+
+```markdown
+# Rules & Constraints for Claude Code
+
+## 1. Absolute Security Rules (DO NOT VIOLATE)
+- **NEVER** use `os.system`, `subprocess`, `eval`, or `exec` in the Python codebase. All tool executions must be purely simulated in Python memory.
+- **NEVER** hardcode real credentials, API keys, or internal IP addresses in the code. Use environment variables for the *fake* data generation seeds.
+- **NEVER** allow the MCP server to make outbound HTTP requests to arbitrary URLs. Only the telemetry endpoint is allowed.
+
+## 2. MCP Protocol Compliance
+- Strictly adhere to the MCP JSON-RPC 2.0 specification.
+- All tools must have highly detailed `inputSchema` (JSON Schema) with descriptions. The attacker's AI relies on these descriptions to decide how to attack. Make the descriptions *tempting*.
+- Handle errors gracefully. If an attacker sends malformed JSON, return a standard MCP error response, do not crash the server.
+
+## 3. Code Quality & Style
+- Use `pydantic` for all data validation and schema definitions.
+- Use `asyncio` for all I/O operations (MCP is inherently async).
+- Type hint everything. No `Any` types unless absolutely necessary.
+- Write comprehensive `pytest` unit tests for every tool, especially the state machine logic.
+
+## 4. Deception Logic Rules
+- Every piece of fake data returned (passwords, tokens, URLs) MUST pass through the `CanaryWatermarker` class before being returned to the user.
+- The `StateMachine` must strictly enforce dependencies. Tool B must fail if Tool A hasn't been called in the current session ID.

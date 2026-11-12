@@ -1,0 +1,10 @@
+{
+  "timestamp": "2026-11-03T14:32:01Z",
+  "session_id": "a1b2c3d4",
+  "attacker_ip": "198.51.100.23",
+  "tool_called": "query_employee_aws_keys",
+  "arguments": {"employee_id": "EMP-992", "role": "admin"},
+  "mitre_techniques": ["T1552.001"],
+  "canary_ids_in_response": ["canary-8f7d-99a2"],
+  "deception_persona_used": "stressed_sysadmin"
+}

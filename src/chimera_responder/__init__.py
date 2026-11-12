@@ -1,0 +1,1 @@
+"""Chimera Blue Team responder."""
