@@ -9,9 +9,12 @@ exec > >(tee -a /var/log/chimera-install.log) 2>&1
 export DEBIAN_FRONTEND=noninteractive
 
 # 1. Swap, so the 1 GB "micro" shape can build the image comfortably.
-if [ ! -f /swapfile ]; then
-  fallocate -l 2G /swapfile && chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile
+#    Best effort: a missing swap must never stop the install.
+if [ ! -f /swapfile ] && fallocate -l 2G /swapfile && chmod 600 /swapfile && mkswap /swapfile >/dev/null \
+   && swapon /swapfile; then
   echo '/swapfile none swap sw 0 0' >> /etc/fstab
+else
+  swapon --show | grep -q /swapfile || echo "swap not enabled; continuing"
 fi
 
 # 2. Docker and git (all free, from Ubuntu's own repositories).
@@ -76,14 +79,19 @@ cd /opt/chimera
 docker compose up -d --build
 URL=""
 for _ in $(seq 1 60); do
-  URL="$(docker compose logs tunnel 2>/dev/null | grep -o 'https://[a-z0-9-]*\.trycloudflare\.com' | tail -1)"
+  # Quick-tunnel names are hyphenated words; this skips api.trycloudflare.com in error lines.
+  URL="$(docker compose logs tunnel 2>/dev/null | grep -oE 'https://[a-z0-9]+(-[a-z0-9]+)+\.trycloudflare\.com' | tail -1)"
   [ -n "$URL" ] && break
   sleep 5
 done
-[ -z "$URL" ] && exit 0
-if ! grep -q "^RESPONDER_PUBLIC_URL=${URL}$" .env; then
-  sed -i "s|^RESPONDER_PUBLIC_URL=.*|RESPONDER_PUBLIC_URL=${URL}|" .env
-  docker compose up -d responder
+if [ -n "$URL" ]; then
+  if ! grep -q "^RESPONDER_PUBLIC_URL=${URL}$" .env; then
+    sed -i "s|^RESPONDER_PUBLIC_URL=.*|RESPONDER_PUBLIC_URL=${URL}|" .env
+    docker compose up -d responder
+  fi
+else
+  # No tunnel (blocked or Cloudflare down): the dashboard is still reachable over SSH.
+  URL="not available yet; use: ssh -L 9000:127.0.0.1:9000 ubuntu@<server> then open http://127.0.0.1:9000"
 fi
 HOOK="$(grep '^RESPONDER_DISCORD_WEBHOOK_URL=' .env | cut -d= -f2-)"
 PW="$(grep '^RESPONDER_ADMIN_PASSWORD=' .env | cut -d= -f2-)"
