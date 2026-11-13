@@ -10,7 +10,7 @@
 Chimera poses as your most valuable internal MCP server. Any agent that touches it gets tracked secrets,<br>and your Blue Team gets a one-click button to cut it off.
 
 [![CI](https://github.com/xsignon-secure/Chimera/actions/workflows/ci.yml/badge.svg)](https://github.com/xsignon-secure/Chimera/actions/workflows/ci.yml)
-[![Image](https://img.shields.io/badge/ghcr.io-chimera%3A1.0.0-16406B?logo=docker&logoColor=white)](https://github.com/xsignon-secure/Chimera/pkgs/container/chimera)
+[![Image](https://img.shields.io/badge/ghcr.io-chimera%3A1.1.0-16406B?logo=docker&logoColor=white)](https://github.com/xsignon-secure/Chimera/pkgs/container/chimera)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.11%20%7C%203.12%20%7C%203.13-3776AB?logo=python&logoColor=white)](pyproject.toml)
 [![MCP](https://img.shields.io/badge/MCP-2026%20spec-F59E0B)](https://modelcontextprotocol.io)

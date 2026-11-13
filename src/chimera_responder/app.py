@@ -32,6 +32,7 @@ from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse, Response
 from starlette.routing import Mount, Route
 
+from chimera import __version__
 from chimera.models import Event
 from chimera.signing import SIG_HEADER, TS_HEADER, verify
 from chimera_responder.config import ResponderSettings
@@ -165,7 +166,7 @@ def _page(title: str, body: str, refresh: int = 0) -> HTMLResponse:
 def build_mcp(responder: Responder) -> MCPServer:
     mcp: MCPServer = MCPServer(
         name="Chimera-BlueTeam-MCP",
-        version="1.0.0",
+        version=__version__,
         log_level="WARNING",
         instructions=(
             "Blue Team console for the Chimera MCP honeypot. Triage incidents raised by the honeypot, "
