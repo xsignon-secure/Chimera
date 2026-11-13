@@ -24,7 +24,7 @@ import threading
 import time
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, get_args
 
 import anyio.to_thread
 from pydantic import BaseModel, Field
@@ -38,6 +38,7 @@ from chimera_responder.config import ResponderSettings
 Status = Literal[
     "monitoring", "pending_approval", "dry_run", "isolated", "rejected", "released", "failed", "blocked_by_policy"
 ]
+STATUSES: tuple[str, ...] = get_args(Status)
 
 
 class Incident(BaseModel):
@@ -68,6 +69,7 @@ class IncidentStore:
     def __init__(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
+        self._inserts = 0
         self._db = sqlite3.connect(str(path), check_same_thread=False, isolation_level=None)
         self._db.execute("PRAGMA journal_mode=WAL")
         self._db.executescript(
@@ -107,7 +109,8 @@ class IncidentStore:
 
     async def first_seen(self, event_id: str) -> bool:
         rows = await self.q("INSERT OR IGNORE INTO seen(event_id) VALUES (?) RETURNING event_id", (event_id,))
-        if rows and secrets.randbelow(1000) == 0:  # keep the de-duplication table bounded
+        self._inserts += bool(rows)
+        if rows and self._inserts % 1000 == 0:  # keep the de-duplication table bounded
             await self.q("DELETE FROM seen WHERE rowid <= (SELECT MAX(rowid) FROM seen) - ?", (self.SEEN_KEEP,))
         return bool(rows)
 
@@ -136,6 +139,10 @@ class Responder:
         self.actions = actions or Actions(settings)
         self._protected = [ipaddress.ip_network(c, strict=False) for c in settings.protected_networks]
         self._lock = anyio.Lock()
+        self.sensor: dict[str, Any] = {}
+        self._sensor_state = "unknown"
+        self.alerts_received = 0
+        self.alerts_rejected = 0
 
     def is_protected(self, ip: str) -> bool:
         try:
@@ -243,8 +250,13 @@ class Responder:
             inc.id, actor, "isolate", "; ".join(f"{r.name}:{'ok' if r.ok else 'fail'}" for r in results)
         )
 
+    @property
+    def _notifies(self) -> bool:
+        st = self.settings
+        return bool(st.slack_webhook_url or st.discord_webhook_url or st.ntfy_url)
+
     async def _notify(self, inc: Incident) -> None:
-        if not (self.settings.slack_webhook_url or self.settings.discord_webhook_url):
+        if not self._notifies:
             return
         verb = {
             "pending_approval": "needs your approval to isolate",
@@ -260,7 +272,56 @@ class Responder:
             f"Client: {chat_escape(', '.join(inc.clients[:2]) or '-')}\n"
             f"{self.settings.public_url.rstrip('/')}/incidents/{inc.id}"
         )
-        await self.actions.notify(text)
+        link = f"{self.settings.public_url.rstrip('/')}/incidents/{inc.id}"
+        urgent = inc.status in {"pending_approval", "isolated", "failed"} and inc.severity in {"high", "critical"}
+        await self.actions.notify(
+            text, title=f"Chimera {inc.id}: {inc.status.replace('_', ' ')}", urgent=urgent, link=link
+        )
+
+    # ------------------------------------------------------------------ sensor health
+    def record_heartbeat(self, event: Event) -> None:
+        args = event.arguments or {}
+        self.sensor = {
+            "last_seen": _now(),
+            "version": str(args.get("version", ""))[:32],
+            "alerts_sent_ok": _int(args.get("alerts_sent_ok")),
+            "alerts_sent_failed": _int(args.get("alerts_sent_failed")),
+            "queue_depth": _int(args.get("queue_depth")),
+        }
+
+    def sensor_silent_for(self) -> float | None:
+        """Seconds since the last heartbeat, or None if none has arrived since start."""
+        last = self.sensor.get("last_seen")
+        return (_now() - last).total_seconds() if isinstance(last, datetime) else None
+
+    async def check_sensor(self) -> str:
+        """Alert once when the honeypot goes silent and once when it comes back. Returns the state."""
+        limit = self.settings.sensor_silence_minutes * 60
+        silent = self.sensor_silent_for()
+        if limit <= 0 or silent is None:
+            return "unknown"
+        state = "silent" if silent > limit else "ok"
+        if state != self._sensor_state:
+            previous, self._sensor_state = self._sensor_state, state
+            if state == "silent":
+                await self.store.audit("-", "system", "sensor_silent", f"no heartbeat for {int(silent)}s")
+                if self._notifies:
+                    await self.actions.notify(
+                        f"*Chimera honeypot is silent*: no heartbeat for {int(silent // 60)} min. "
+                        "The decoy may be down or cut off from the responder.",
+                        title="Chimera sensor silent",
+                        urgent=True,
+                        link=self.settings.public_url,
+                    )
+            elif previous == "silent":
+                await self.store.audit("-", "system", "sensor_recovered", "heartbeat resumed")
+                if self._notifies:
+                    await self.actions.notify(
+                        "*Chimera honeypot is back*: heartbeats resumed.",
+                        title="Chimera sensor back",
+                        link=self.settings.public_url,
+                    )
+        return state
 
     async def approve(self, incident_id: str, actor: str, nonce: str | None = None) -> Incident:
         async with self._lock:
@@ -362,6 +423,15 @@ def _fold(inc: Incident, e: Event) -> None:
         }
     )
     inc.timeline = inc.timeline[-200:]
+
+
+def _int(value: object) -> int:
+    if isinstance(value, bool) or not isinstance(value, int | float | str):
+        return 0
+    try:
+        return max(0, int(value))
+    except ValueError:
+        return 0
 
 
 def _context(inc: Incident) -> dict[str, Any]:

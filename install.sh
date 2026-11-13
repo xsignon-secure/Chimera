@@ -16,6 +16,8 @@
 #   CHIMERA_MODE           responder mode: approve (default) | dry_run | auto
 #   CHIMERA_ISOLATION_TTL  hours before an isolated address is released automatically (default: 168, 0 = never)
 #   CHIMERA_DISCORD_WEBHOOK / CHIMERA_SLACK_WEBHOOK   send alerts and the dashboard link there
+#   CHIMERA_NTFY           yes: free phone push alerts via the ntfy app (a secret ntfy.sh topic is generated);
+#                          or a full topic URL such as https://ntfy.example.com/my-topic for a self-hosted server
 #   CHIMERA_TUNNEL         yes (default): private HTTPS dashboard link via a free Cloudflare quick tunnel
 #                          no: dashboard only on 127.0.0.1:9000 (reach it over SSH)
 #   CHIMERA_VERSION        git ref or release tag to install (default: main)
@@ -143,6 +145,15 @@ EOF
 else
   say "Keeping existing configuration ($DIR/.env)"
 fi
+# Settings added in later releases; existing installs gain them on update.
+grep -q '^RESPONDER_METRICS_TOKEN=' .env || echo "RESPONDER_METRICS_TOKEN=$(gen)" >> .env
+if [ -n "${CHIMERA_NTFY:-}" ] && ! grep -q '^RESPONDER_NTFY_URL=' .env; then
+  case "$CHIMERA_NTFY" in
+    http://*|https://*) NTFY_URL="$CHIMERA_NTFY" ;;
+    *) NTFY_URL="https://ntfy.sh/chimera-$(python3 -c 'import secrets; print(secrets.token_hex(12))')" ;;
+  esac
+  echo "RESPONDER_NTFY_URL=${NTFY_URL}" >> .env
+fi
 chmod 600 .env
 
 # 6. Optional private HTTPS link to the dashboard. The decoy never sees this tunnel.
@@ -214,6 +225,10 @@ PW="$(grep '^RESPONDER_ADMIN_PASSWORD=' .env | cut -d= -f2-)"
 DECOY="$(grep '^CHIMERA_PUBLIC_BASE_URL=' .env | cut -d= -f2-)/mcp"
 umask 077
 printf 'Dashboard: %s\nUser:      admin\nPassword:  %s\nDecoy MCP: %s\n' "$URL" "$PW" "$DECOY" > ACCESS.txt
+NTFY="$(grep '^RESPONDER_NTFY_URL=' .env | cut -d= -f2-)"
+[ -n "$NTFY" ] && printf 'Phone alerts: install the ntfy app and subscribe to %s (keep it secret)\n' "$NTFY" >> ACCESS.txt
+MT="$(grep '^RESPONDER_METRICS_TOKEN=' .env | cut -d= -f2-)"
+[ -n "$MT" ] && printf 'Metrics: http://127.0.0.1:9000/metrics with header "Authorization: Bearer %s"\n' "$MT" >> ACCESS.txt
 for KEY in RESPONDER_DISCORD_WEBHOOK_URL RESPONDER_SLACK_WEBHOOK_URL; do
   HOOK="$(grep "^${KEY}=" .env | cut -d= -f2-)"
   [ -n "$HOOK" ] || continue
@@ -261,10 +276,17 @@ case "\${1:-help}" in
   bait)      shift; docker compose exec -T honeypot chimera bait "\$@" ;;
   restart)   systemctl restart chimera ;;
   update)    curl -fsSL https://raw.githubusercontent.com/$REPO/main/install.sh | CHIMERA_DIR="$DIR" CHIMERA_TUNNEL="\$( [ -f docker-compose.override.yml ] && echo yes || echo no )" bash ;;
+  phone)     NTFY="\$(grep '^RESPONDER_NTFY_URL=' .env | cut -d= -f2-)"
+             if [ -z "\$NTFY" ]; then
+               NTFY="https://ntfy.sh/chimera-\$(python3 -c 'import secrets; print(secrets.token_hex(12))')"
+               echo "RESPONDER_NTFY_URL=\$NTFY" >> .env; systemctl restart chimera
+             fi
+             echo "Install the free ntfy app (Android/iOS) and subscribe to: \$NTFY"
+             curl -fsS -m 10 -H "Title: Chimera test" -d "Phone alerts are working." "\$NTFY" >/dev/null && echo "Test alert sent." ;;
   uninstall) read -rp "Remove Chimera and delete its recorded events? [y/N] " a; [ "\$a" = y ] || exit 1
              systemctl disable --now chimera; docker compose down -v; rm -f /etc/systemd/system/chimera.service /usr/local/bin/chimera-ctl
              echo "Removed. Configuration and code remain in $DIR (delete it to finish)." ;;
-  *) echo "usage: chimera-ctl status|logs [service]|access|bait [--format claude|cursor|vscode]|restart|update|uninstall" ;;
+  *) echo "usage: chimera-ctl status|logs [service]|access|bait [--format claude|cursor|vscode]|phone|restart|update|uninstall" ;;
 esac
 EOF
 chmod 755 /usr/local/bin/chimera-ctl
@@ -294,6 +316,7 @@ cat <<EOF
   Decoy MCP endpoint   ${DECOY}
   Blue Team dashboard  see: sudo chimera-ctl access   (user admin)
   Plant the bait       sudo chimera-ctl bait            (prints a ready .mcp.json)
+  Phone alerts         sudo chimera-ctl phone           (free, via the ntfy app)
   Manage               chimera-ctl status | logs | update | uninstall
 
   Cloud firewall: allow inbound TCP ${PORT} to this server (AWS security group,

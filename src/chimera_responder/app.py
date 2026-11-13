@@ -12,7 +12,9 @@ from __future__ import annotations
 
 import base64
 import contextlib
+import csv
 import html
+import io
 import ipaddress
 import json
 import logging
@@ -36,7 +38,7 @@ from chimera import __version__
 from chimera.models import Event
 from chimera.signing import SIG_HEADER, TS_HEADER, verify
 from chimera_responder.config import ResponderSettings
-from chimera_responder.core import Incident, Responder
+from chimera_responder.core import STATUSES, Incident, Responder
 
 log = logging.getLogger("chimera.responder")
 MAX_ALERT_BYTES = 256 * 1024
@@ -121,6 +123,13 @@ button{border:1px solid var(--line);background:var(--card);color:var(--ink);bord
 cursor:pointer}button.go{background:#b42318;color:#fff;border-color:#b42318}
 code{font-size:12px;word-break:break-all}a{color:var(--accent)}form{display:inline}
 """
+
+
+def _cell(value: object) -> object:
+    """Neutralise spreadsheet formulas in attacker-controlled CSV cells."""
+    if isinstance(value, str) and value[:1] in ("=", "+", "-", "@", "\t", "\r"):
+        return "'" + value
+    return value
 
 
 def _pill(sev: str) -> str:
@@ -310,37 +319,201 @@ def create_app(settings: ResponderSettings | None = None, responder: Responder |
         if len(body) > MAX_ALERT_BYTES:
             return JSONResponse({"error": "too large"}, status_code=413)
         if not verify(s.honeypot_secret, body, request.headers.get(SIG_HEADER), request.headers.get(TS_HEADER)):
+            r.alerts_rejected += 1
             return JSONResponse({"error": "bad signature"}, status_code=401)
         try:
             event = Event.model_validate_json(body)
         except ValidationError:
+            r.alerts_rejected += 1
             return JSONResponse({"error": "invalid event"}, status_code=400)
+        if event.kind == "sensor.heartbeat":
+            r.record_heartbeat(event)
+            await r.check_sensor()
+            return JSONResponse({"heartbeat": "ok"})
+        r.alerts_received += 1
         inc = await r.ingest(event)
         return JSONResponse({"incident": inc.id if inc else None, "status": inc.status if inc else None})
+
+    async def filtered(request: Request) -> list[Incident]:
+        q = request.query_params.get("q", "").strip().lower()[:100]
+        status = request.query_params.get("status", "")
+        severity = request.query_params.get("severity", "")
+        out = []
+        for i in await r.store.all(10_000 if (q or status or severity) else 200):
+            if status and i.status != status:
+                continue
+            if severity and i.severity != severity:
+                continue
+            if q:
+                hay = " ".join([i.id, i.source_ip, *i.tools, *i.clients, *i.techniques, *i.iocs, *i.canaries]).lower()
+                if q not in hay:
+                    continue
+            out.append(i)
+        return out
+
+    def sensor_line() -> str:
+        silent = r.sensor_silent_for()
+        if silent is None:
+            return "Sensor: <b>waiting for first heartbeat</b>"
+        limit = s.sensor_silence_minutes * 60
+        if limit and silent > limit:
+            return f"Sensor: <b style='color:#b42318'>SILENT for {int(silent // 60)} min</b>"
+        failed = r.sensor.get("alerts_sent_failed", 0)
+        warn = f" · <b style='color:#b54708'>{failed} alert deliveries failed</b>" if failed else ""
+        return f"Sensor: <b>online</b> (last heartbeat {int(silent)}s ago){warn}"
+
+    def options(name: str, values: list[str], current: str) -> str:
+        opts = "".join(
+            f"<option value='{v}'{' selected' if v == current else ''}>{v.replace('_', ' ')}</option>" for v in values
+        )
+        return f"<select name={name}><option value=''>any {name}</option>{opts}</select>"
 
     async def dashboard(request: Request) -> Response:
         if (no := denied(request)) is not None:
             return no
-        incidents = await r.store.all()
+        incidents = await filtered(request)
+        shown = incidents[:200]
         rows = (
             "".join(
                 f"<tr><td><a href='/incidents/{i.id}'>{i.id}</a></td><td><code>{html.escape(i.source_ip)}</code></td>"
                 f"<td>{_pill(i.severity)}</td><td>{html.escape(i.status.replace('_', ' '))}</td>"
                 f"<td>{html.escape(', '.join(i.tools[:4]) or '-')}</td>"
                 f"<td>{html.escape(', '.join(i.clients[:2]) or '-')}</td><td>{_buttons(i)}</td></tr>"
-                for i in incidents
+                for i in shown
             )
-            or "<tr><td colspan=7 class=muted>No incidents yet. The honeypot is quiet.</td></tr>"
+            or "<tr><td colspan=7 class=muted>No matching incidents. The honeypot is quiet.</td></tr>"
         )
         pending = sum(1 for i in incidents if i.status == "pending_approval")
+        qp = request.query_params
+        query = html.escape(qp.get("q", "")[:100], quote=True)
+        export = html.escape(str(request.url.query), quote=True)
+        sep = "?" + export if export else ""
         body = (
             f"<h1>Chimera Blue Team Console</h1><p class=muted>Mode: <b>{s.mode}</b> · trigger ≥ "
             f"{s.trigger_severity} · actions: {', '.join(s.actions)} · {pending} awaiting approval</p>"
+            f"<p class=muted>{sensor_line()}</p>"
+            "<form method=get action='/' class=card style='display:flex;gap:8px;flex-wrap:wrap'>"
+            f"<input name=q value='{query}' placeholder='Search IP, incident, tool, client, technique, IOC' "
+            "style='flex:1;min-width:220px;padding:5px'>"
+            f"{options('status', list(STATUSES), qp.get('status', ''))}"
+            f"{options('severity', ['critical', 'high', 'medium', 'low', 'info'], qp.get('severity', ''))}"
+            "<button>Filter</button></form>"
             "<div class=card><table><tr><th>Incident</th><th>Source</th><th>Severity</th><th>Status</th>"
             f"<th>Tools used</th><th>Client</th><th></th></tr>{rows}</table></div>"
-            "<p class=muted><a href='/audit'>Audit log</a></p>"
+            f"<p class=muted>{len(shown)} of {len(incidents)} shown · Export: <a href='/export.csv{sep}'>CSV</a> · "
+            f"<a href='/export.json{sep}'>JSON</a> · <a href='/audit'>Audit log</a></p>"
         )
         return _page("Chimera Responder", body, refresh=30)
+
+    async def export(request: Request) -> Response:
+        if (no := denied(request)) is not None:
+            return no
+        incidents = await filtered(request)
+        fmt = request.path_params["fmt"]
+        headers = {"Cache-Control": "no-store", "Content-Disposition": f"attachment; filename=chimera-incidents.{fmt}"}
+        if fmt == "json":
+            data = [i.model_dump(mode="json", exclude={"approval_nonce"}) for i in incidents]
+            return JSONResponse(data, headers=headers)
+        buf = io.StringIO()
+        w = csv.writer(buf)
+        w.writerow(
+            [
+                "id",
+                "source_ip",
+                "status",
+                "severity",
+                "created",
+                "updated",
+                "events",
+                "tools",
+                "clients",
+                "techniques",
+                "canaries",
+                "iocs",
+            ]
+        )
+        for i in incidents:
+            w.writerow(
+                [
+                    _cell(v)
+                    for v in (
+                        i.id,
+                        i.source_ip,
+                        i.status,
+                        i.severity,
+                        i.created.isoformat(),
+                        i.updated.isoformat(),
+                        i.event_count,
+                        "; ".join(i.tools),
+                        "; ".join(i.clients),
+                        "; ".join(i.techniques),
+                        "; ".join(i.canaries),
+                        "; ".join(i.iocs),
+                    )
+                ]
+            )
+        return Response(buf.getvalue(), media_type="text/csv", headers=headers)
+
+    async def metrics(request: Request) -> Response:
+        auth = request.headers.get("authorization", "")
+        if not s.metrics_token or not _same(auth, f"Bearer {s.metrics_token}"):
+            return PlainTextResponse("Unauthorized", status_code=401)
+        incidents = await r.store.all(100_000)
+        lines = [
+            "# HELP chimera_info Chimera responder build and mode.",
+            "# TYPE chimera_info gauge",
+            f'chimera_info{{version="{__version__}",mode="{s.mode}"}} 1',
+            "# HELP chimera_incidents Incidents by status.",
+            "# TYPE chimera_incidents gauge",
+        ]
+        for st in STATUSES:
+            lines.append(f'chimera_incidents{{status="{st}"}} {sum(1 for i in incidents if i.status == st)}')
+        lines += [
+            "# HELP chimera_incidents_by_severity Incidents by highest severity.",
+            "# TYPE chimera_incidents_by_severity gauge",
+        ]
+        for sev in ("critical", "high", "medium", "low", "info"):
+            lines.append(
+                f'chimera_incidents_by_severity{{severity="{sev}"}} {sum(1 for i in incidents if i.severity == sev)}'
+            )
+        isolations = await r.store.q("SELECT COUNT(*) FROM audit WHERE action='isolate'")
+        silent = r.sensor_silent_for()
+        limit = s.sensor_silence_minutes * 60
+        up = -1 if silent is None else (0 if limit and silent > limit else 1)
+        hb = r.sensor
+        counters = [
+            ("chimera_alerts_received_total", "counter", "Signed alerts accepted since start.", r.alerts_received),
+            ("chimera_alerts_rejected_total", "counter", "Alerts refused (bad signature or body).", r.alerts_rejected),
+            ("chimera_isolations_total", "counter", "Isolation actions ever taken.", int(isolations[0][0])),
+            ("chimera_sensor_up", "gauge", "1 online, 0 silent, -1 no heartbeat yet.", up),
+            (
+                "chimera_sensor_heartbeat_age_seconds",
+                "gauge",
+                "Seconds since the last heartbeat.",
+                -1 if silent is None else round(silent, 1),
+            ),
+            (
+                "chimera_sensor_alerts_sent_ok",
+                "gauge",
+                "Alerts the sensor delivered.",
+                hb.get("alerts_sent_ok", 0),
+            ),
+            (
+                "chimera_sensor_alerts_sent_failed",
+                "gauge",
+                "Alert deliveries that failed at the sensor.",
+                hb.get("alerts_sent_failed", 0),
+            ),
+            (
+                "chimera_sensor_queue_depth",
+                "gauge",
+                "Alerts waiting in the sensor queues.",
+                hb.get("queue_depth", 0),
+            ),
+        ]
+        for name, kind, help_, value in counters:
+            lines += [f"# HELP {name} {help_}", f"# TYPE {name} {kind}", f"{name} {value}"]
+        return PlainTextResponse("\n".join(lines) + "\n", media_type="text/plain; version=0.0.4")
 
     async def incident(request: Request) -> Response:
         if (no := denied(request)) is not None:
@@ -431,14 +604,16 @@ def create_app(settings: ResponderSettings | None = None, responder: Responder |
             return PlainTextResponse("Not Found", status_code=404)
         return JSONResponse({"status": "ok", "mode": s.mode})
 
-    async def expiry_loop() -> None:
+    async def maintenance_loop() -> None:
+        """Every minute: release expired isolations and watch for a silent sensor."""
         while True:
             try:
                 released = await r.expire_isolations()
                 if released:
                     log.info("isolation TTL released %s", ", ".join(released))
+                await r.check_sensor()
             except Exception:  # noqa: BLE001 - keep the loop alive
-                log.exception("isolation expiry failed")
+                log.exception("maintenance failed")
             await anyio.sleep(60)
 
     @contextlib.asynccontextmanager
@@ -446,8 +621,7 @@ def create_app(settings: ResponderSettings | None = None, responder: Responder |
         if not s.admin_password:
             log.warning("RESPONDER_ADMIN_PASSWORD is empty: dashboard is locked")
         async with mcp_app.router.lifespan_context(mcp_app), anyio.create_task_group() as tg:
-            if s.isolation_ttl_hours > 0:
-                tg.start_soon(expiry_loop)
+            tg.start_soon(maintenance_loop)
             yield
             tg.cancel_scope.cancel()
 
@@ -459,6 +633,8 @@ def create_app(settings: ResponderSettings | None = None, responder: Responder |
             Route("/incidents/{iid}", incident),
             Route("/incidents/{iid}/{verb}", act, methods=["POST"]),
             Route("/feeds/blocklist.txt", feed),
+            Route("/export.{fmt:str}", export),
+            Route("/metrics", metrics),
             Route("/healthz", health),
             Mount("/mcp", app=BearerGuard(mcp_app, s.mcp_token)),
         ],

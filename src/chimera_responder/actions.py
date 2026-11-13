@@ -119,8 +119,8 @@ class Actions:
             ),
         )
 
-    async def notify(self, text: str) -> None:
-        """Best-effort analyst notification to Slack / Discord incoming webhooks."""
+    async def notify(self, text: str, title: str = "Chimera", urgent: bool = False, link: str = "") -> None:
+        """Best-effort analyst notification to Slack / Discord webhooks and ntfy phone push."""
         targets = [
             (self.s.slack_webhook_url, {"text": text}),
             (
@@ -136,6 +136,20 @@ class Actions:
                     await client.post(url, json=payload)
                 except (httpx.HTTPError, PermissionError) as exc:
                     log.warning("notification failed: %s", type(exc).__name__)
+            if self.s.ntfy_url:
+                plain = text.replace("*", "").replace("`", "")
+                headers = {
+                    # Header values must be latin-1; attacker text never reaches them.
+                    "Title": title.encode("ascii", "replace").decode(),
+                    "Priority": "urgent" if urgent else "default",
+                    "Tags": "rotating_light" if urgent else "shield",
+                }
+                if link:
+                    headers["Click"] = link
+                try:
+                    await client.post(self.s.ntfy_url, content=plain.encode()[:4000], headers=headers)
+                except (httpx.HTTPError, PermissionError) as exc:
+                    log.warning("ntfy notification failed: %s", type(exc).__name__)
 
     # ------------------------------------------------------------------
     async def _blocklist(self, ip: str, add: bool) -> ActionResult:

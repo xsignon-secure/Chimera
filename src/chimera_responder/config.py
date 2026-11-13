@@ -47,6 +47,12 @@ class ResponderSettings(BaseModel):
     """Any of: blocklist, webhook, wazuh."""
     slack_webhook_url: str = ""
     discord_webhook_url: str = ""
+    ntfy_url: str = ""
+    """Phone push alerts via ntfy (https://ntfy.sh/<secret-topic> or a self-hosted server). Free."""
+    metrics_token: str = ""
+    """Bearer token for the Prometheus metrics page (/metrics). Empty disables it."""
+    sensor_silence_minutes: int = 5
+    """Alert when the honeypot has sent no heartbeat for this long (0 disables)."""
     """Analyst notifications (new incident awaiting approval, isolation done)."""
     action_webhook_url: str = ""
     action_webhook_secret: str = ""
@@ -62,7 +68,14 @@ class ResponderSettings(BaseModel):
     def _check(self) -> ResponderSettings:
         for cidr in (*self.protected_networks, *self.alerts_only_networks):
             ipaddress.ip_network(cidr, strict=False)
-        for name in ("honeypot_secret", "admin_password", "mcp_token", "feed_token", "action_webhook_secret"):
+        for name in (
+            "honeypot_secret",
+            "admin_password",
+            "mcp_token",
+            "feed_token",
+            "metrics_token",
+            "action_webhook_secret",
+        ):
             if "change-me" in getattr(self, name).lower():
                 raise ValueError(f"RESPONDER_{name.upper()} still holds the placeholder from .env.example")
         unknown = set(self.actions) - {"blocklist", "webhook", "wazuh"}
@@ -75,7 +88,13 @@ class ResponderSettings(BaseModel):
         return sorted(
             {
                 urlsplit(u).hostname or ""
-                for u in (self.action_webhook_url, self.wazuh_url, self.slack_webhook_url, self.discord_webhook_url)
+                for u in (
+                    self.action_webhook_url,
+                    self.wazuh_url,
+                    self.slack_webhook_url,
+                    self.discord_webhook_url,
+                    self.ntfy_url,
+                )
                 if u
             }
             - {""}
@@ -95,6 +114,8 @@ class ResponderSettings(BaseModel):
             "action_webhook_url",
             "slack_webhook_url",
             "discord_webhook_url",
+            "ntfy_url",
+            "metrics_token",
             "action_webhook_secret",
             "wazuh_url",
             "wazuh_user",
@@ -110,6 +131,8 @@ class ResponderSettings(BaseModel):
             v["port"] = int(_env("PORT"))
         if _env("MAX_ISOLATIONS_PER_HOUR"):
             v["max_isolations_per_hour"] = int(_env("MAX_ISOLATIONS_PER_HOUR"))
+        if _env("SENSOR_SILENCE_MINUTES"):
+            v["sensor_silence_minutes"] = int(_env("SENSOR_SILENCE_MINUTES"))
         if _env("ISOLATION_TTL_HOURS"):
             v["isolation_ttl_hours"] = float(_env("ISOLATION_TTL_HOURS"))
         if _env("DATA_DIR"):
