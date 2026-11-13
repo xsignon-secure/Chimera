@@ -69,6 +69,7 @@ class IncidentStore:
     def __init__(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
+        self._inserts = 0
         self._db = sqlite3.connect(str(path), check_same_thread=False, isolation_level=None)
         self._db.execute("PRAGMA journal_mode=WAL")
         self._db.executescript(
@@ -108,7 +109,8 @@ class IncidentStore:
 
     async def first_seen(self, event_id: str) -> bool:
         rows = await self.q("INSERT OR IGNORE INTO seen(event_id) VALUES (?) RETURNING event_id", (event_id,))
-        if rows and secrets.randbelow(1000) == 0:  # keep the de-duplication table bounded
+        self._inserts += bool(rows)
+        if rows and self._inserts % 1000 == 0:  # keep the de-duplication table bounded
             await self.q("DELETE FROM seen WHERE rowid <= (SELECT MAX(rowid) FROM seen) - ?", (self.SEEN_KEEP,))
         return bool(rows)
 
