@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Project Chimera: one-line installer.
 #
-#   curl -fsSL https://raw.githubusercontent.com/xsignon-secure/Honeypot-MCP/main/install.sh | sudo bash
+#   curl -fsSL https://raw.githubusercontent.com/xsignon-secure/Chimera/main/install.sh | sudo bash
 #
 # Works on a fresh Linux server on any cloud or on-prem: Ubuntu, Debian, RHEL, Rocky, Alma,
 # Oracle Linux, Amazon Linux, Fedora. Installs Docker if needed, generates fresh secrets,
@@ -21,7 +21,7 @@
 #   CHIMERA_DIR            install directory (default: /opt/chimera)
 set -Eeuo pipefail
 
-REPO="xsignon-secure/Honeypot-MCP"
+REPO="xsignon-secure/Chimera"
 CH_REF="${CHIMERA_VERSION:-main}"
 DIR="${CHIMERA_DIR:-/opt/chimera}"
 PORT="${CHIMERA_PORT:-8000}"

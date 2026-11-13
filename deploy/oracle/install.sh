@@ -9,7 +9,7 @@ set -euo pipefail
 [[ "$DISCORD_WEBHOOK" == https://* ]] && export CHIMERA_DISCORD_WEBHOOK="$DISCORD_WEBHOOK"
 for i in 1 2 3 4 5; do
   # cloud-init can start before the network is fully up.
-  curl -fsSL https://raw.githubusercontent.com/xsignon-secure/Honeypot-MCP/main/install.sh -o /root/chimera-install.sh && break
+  curl -fsSL https://raw.githubusercontent.com/xsignon-secure/Chimera/main/install.sh -o /root/chimera-install.sh && break
   sleep $((i * 10))
 done
 bash /root/chimera-install.sh

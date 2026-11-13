@@ -1,13 +1,13 @@
 #!/bin/bash
 # Project Chimera: create a free Oracle Cloud server running Chimera.
 # Run in Oracle Cloud Shell (top bar >_ icon), which is already signed in:
-#   curl -fsSLO https://raw.githubusercontent.com/xsignon-secure/Honeypot-MCP/main/deploy/oracle/provision.sh
+#   curl -fsSLO https://raw.githubusercontent.com/xsignon-secure/Chimera/main/deploy/oracle/provision.sh
 #   bash provision.sh                      # optionally: DISCORD_WEBHOOK=https://discord.com/api/webhooks/... bash provision.sh
 # Uses only Always Free resources (Ampere A1 1 OCPU / 6 GB, or E2.1.Micro), in the root compartment.
 set -euo pipefail
 C="${OCI_COMPARTMENT:-${OCI_TENANCY:?run this in Oracle Cloud Shell}}"
 NAME="chimera"
-RAW="https://raw.githubusercontent.com/xsignon-secure/Honeypot-MCP/${CHIMERA_REF:-main}/deploy/oracle/install.sh"
+RAW="https://raw.githubusercontent.com/xsignon-secure/Chimera/${CHIMERA_REF:-main}/deploy/oracle/install.sh"
 say() { printf '\n==> %s\n' "$*"; }
 q() { oci "$@" --raw-output 2>/dev/null; }
 

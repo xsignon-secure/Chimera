@@ -49,7 +49,7 @@ _"Typical" means most of the open-source projects we reviewed. Individual projec
 On a fresh Linux server (any cloud or on-prem; Ubuntu 22.04/24.04 tested, Debian and RHEL-family supported):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/xsignon-secure/Honeypot-MCP/main/install.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/xsignon-secure/Chimera/main/install.sh | sudo bash
 ```
 
 It installs Docker if needed, pulls the published image (`ghcr.io/xsignon-secure/chimera`, amd64 + arm64), generates fresh secrets, starts the decoy and the Blue Team responder as a systemd service that survives reboots, and prints the decoy URL. Then:
