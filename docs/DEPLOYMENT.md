@@ -2,7 +2,7 @@
 
 Everything below is free. You need a Linux host (a small VM, 1 vCPU and 1 GB RAM, is plenty), Docker with Compose v2, and optionally a free canarytokens.org account and a Slack or Discord channel.
 
-> **Fastest path:** `curl -fsSL https://raw.githubusercontent.com/xsignon-secure/Honeypot-MCP/main/install.sh | sudo bash` does steps 1 to 3 for you on a fresh Linux server (see the README). The rest of this guide covers manual setup and the integrations.
+> **Fastest path:** `curl -fsSL https://raw.githubusercontent.com/xsignon-secure/Chimera/main/install.sh | sudo bash` does steps 1 to 3 for you on a fresh Linux server (see the README). The rest of this guide covers manual setup and the integrations.
 
 ## Releasing (maintainers)
 
