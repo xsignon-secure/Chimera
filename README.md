@@ -151,25 +151,25 @@ Deep dive: [docs/HOW-IT-WORKS.md](docs/HOW-IT-WORKS.md).
 3 personas and 13 tools, a seeded fake world, a fake bastion shell with pipes and variables, per-session personas, realistic latency, and a per-install server name so no two installs look alike.
 
 **🪤 Every secret is a tripwire**
-8 canary formats plus URL callbacks, cross-session reuse detection, and optional real [Canarytokens](https://canarytokens.org) AWS keys that alert if they're tried against AWS.
+8 canary formats plus URL callbacks, cross-session reuse detection, and optional real [Canarytokens](https://canarytokens.org) AWS keys that alert if they're tried against AWS. Stolen secrets are caught wherever they come back: MCP calls, the decoy sign-in page, headers, cookies or the URL.
 
 **🧠 AI-agent fingerprinting**
 Client identity, capabilities, LLM think-time, natural-language justifications in arguments, and prompt-injection markers.
+
+**📱 Alerts in your pocket**
+Free phone push alerts through the ntfy app, plus Slack and Discord. Tap a push to open the incident. You're also told if the decoy itself goes silent.
 
 </td>
 <td width="50%" valign="top">
 
 **🛡️ Bait-to-containment loop**
-`dry_run`, one-click `approve` (default) or `auto`. Blocklist feed for pfSense, OPNsense, FortiGate and more, Wazuh active response (tested against a real Wazuh 4.14), and a signed SOAR webhook.
+`dry_run`, one-click `approve` (default) or `auto`. Blocklist feed for pfSense, OPNsense, FortiGate and more, Wazuh active response (tested against a real Wazuh 4.14), and a signed SOAR webhook. Blocks lift automatically after a set time, and IPv6 attackers are blocked across their whole /64.
 
 **🤖 Blue Team MCP server**
-Let a defender's AI agent triage and isolate. Attacker-written evidence is wrapped as untrusted data, so the attacker can't prompt-inject your defender.
+Let a defender's AI agent triage and isolate. Attacker-written evidence is wrapped as untrusted data, so the attacker can't prompt-inject your defender. Humans get a dashboard with search, filters and CSV/JSON export.
 
 **📡 Plugs into your SIEM**
 JSONL, CEF over syslog (Splunk, QRadar, Wazuh, Elastic), signed webhooks, STIX 2.1 bundles for MISP and OpenCTI, and a Prometheus metrics page.
-
-**📱 Alerts in your pocket**
-Free phone push alerts through the ntfy app, plus Slack and Discord. You're told if the decoy itself goes silent.
 
 </td>
 </tr>
