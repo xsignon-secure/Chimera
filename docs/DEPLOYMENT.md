@@ -2,6 +2,12 @@
 
 Everything below is free. You need a Linux host (a small VM, 1 vCPU and 1 GB RAM, is plenty), Docker with Compose v2, and optionally a free canarytokens.org account and a Slack or Discord channel.
 
+> **Fastest path:** `curl -fsSL https://raw.githubusercontent.com/xsignon-secure/Honeypot-MCP/main/install.sh | sudo bash` does steps 1 to 3 for you on a fresh Linux server (see the README). The rest of this guide covers manual setup and the integrations.
+
+## Releasing (maintainers)
+
+Tag a version that matches `pyproject.toml` and push it: `git tag v1.0.0 && git push origin v1.0.0`. The `release` workflow builds `ghcr.io/xsignon-secure/chimera:<version>` and `:latest` for amd64 and arm64, smoke-tests it, and creates a GitHub Release with `install.sh`. The first time, open the package's settings on GitHub (Packages → chimera → Package settings) and set its visibility to **Public** so installs can pull it anonymously. Until then the installer builds from source automatically.
+
 ## 1. Configure
 
 ```bash
