@@ -44,14 +44,32 @@ _"Typical" means most of the open-source projects we reviewed. Individual projec
 
 ---
 
-## Quick start (Docker, recommended)
+## Install in one line
+
+On a fresh Linux server (any cloud or on-prem; Ubuntu 22.04/24.04 tested, Debian and RHEL-family supported):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/xsignon-secure/Honeypot-MCP/main/install.sh | sudo bash
+```
+
+It installs Docker if needed, pulls the published image (`ghcr.io/xsignon-secure/chimera`, amd64 + arm64), generates fresh secrets, starts the decoy and the Blue Team responder as a systemd service that survives reboots, and prints the decoy URL. Then:
+
+```bash
+sudo chimera-ctl access   # dashboard link + admin password
+sudo chimera-ctl bait     # ready-to-plant .mcp.json for the decoy
+chimera-ctl status | logs | update | uninstall
+```
+
+Open inbound TCP 8000 in your cloud firewall (security group / NSG / security list); keep 9000 closed. Optional settings go in front of `bash`, for example `curl ... | sudo CHIMERA_PROFILE=full CHIMERA_SERVER_NAME=acme-iam-broker CHIMERA_DISCORD_WEBHOOK=https://discord.com/api/webhooks/... bash`. See the top of [`install.sh`](install.sh) for every option (`CHIMERA_PORT`, `CHIMERA_MODE`, `CHIMERA_TUNNEL`, `CHIMERA_VERSION`, ...). Re-running the installer upgrades in place and keeps your configuration.
+
+## Quick start (Docker Compose, manual)
 
 Requirements: Docker with Compose v2. Nothing else, and no paid services.
 
 ```bash
 cp .env.example .env
 # Edit .env: set the five REQUIRED values (secrets, dashboard password, public URL, seed)
-docker compose up -d --build
+docker compose up -d   # pulls the published image; add --build to build from source
 ```
 
 * Decoy MCP endpoint: `http://<host>:8000/mcp`. Announce it the way a real internal server would be, for example in an internal MCP registry, a `.mcp.json` in a tempting repo, or a wiki page. `docker compose exec honeypot chimera bait` prints a ready-to-plant `.mcp.json` (also `--format cursor` or `vscode`).
