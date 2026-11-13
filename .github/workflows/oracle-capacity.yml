@@ -1,0 +1,98 @@
+# Keeps asking Oracle Cloud for an Always Free Ampere server until one is free, then launches
+# Chimera on it (deploy/oracle/install.sh runs as cloud-init). Costs nothing: GitHub Actions is
+# free for public repos and only Always Free shapes are requested. Stops itself once the server exists.
+#
+# Needs one repository secret, OCI_CONFIG: base64 of
+#   {"user":"ocid1.user...","tenancy":"ocid1.tenancy...","fingerprint":"aa:bb:...","region":"us-chicago-1","key":"-----BEGIN PRIVATE KEY-----..."}
+# Expects deploy/oracle/provision.sh to have created chimera-vcn / chimera-subnet, and the admin
+# SSH public key at object storage bucket chimera-boot/chimera.pub. Set repo variable
+# ORACLE_RETRY=off to pause. This repo is public, so nothing here prints an IP or an OCID.
+name: oracle-capacity
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: oracle-capacity
+  cancel-in-progress: false
+
+jobs:
+  launch:
+    if: vars.ORACLE_RETRY != 'off'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Oracle credentials
+        env:
+          OCI_CONFIG: ${{ secrets.OCI_CONFIG }}
+        run: |
+          if [ -z "$OCI_CONFIG" ]; then echo "::notice::OCI_CONFIG secret not set; nothing to do"; echo "SKIP=1" >> "$GITHUB_ENV"; exit 0; fi
+          mkdir -p ~/.oci && chmod 700 ~/.oci
+          echo "$OCI_CONFIG" | base64 -d > /tmp/oci.json
+          python3 - <<'PY'
+          import json, os
+          c = json.load(open("/tmp/oci.json"))
+          for k in ("user", "tenancy", "fingerprint"):
+              print(f"::add-mask::{c[k]}")
+          home = os.path.expanduser("~/.oci")
+          open(f"{home}/key.pem", "w").write(c["key"].strip() + "\n")
+          open(f"{home}/config", "w").write(
+              "[DEFAULT]\n"
+              f"user={c['user']}\ntenancy={c['tenancy']}\nfingerprint={c['fingerprint']}\n"
+              f"region={c.get('region', 'us-chicago-1')}\nkey_file={home}/key.pem\n"
+          )
+          with open(os.environ["GITHUB_ENV"], "a") as env:
+              env.write(f"C={c['tenancy']}\n")
+          PY
+          rm /tmp/oci.json
+          chmod 600 ~/.oci/key.pem ~/.oci/config
+
+      - name: Install OCI CLI
+        if: env.SKIP != '1'
+        run: pipx install oci-cli >/dev/null && oci --version
+
+      - name: Launch when capacity frees up
+        if: env.SKIP != '1'
+        env:
+          SUPPRESS_LABEL_WARNING: "True"
+        run: |
+          set -uo pipefail
+          q() { oci "$@" --raw-output 2>/tmp/err || { sed -n 's/.*"message": "\([^"]*\)".*/\1/p' /tmp/err | head -1 >&2; return 1; }; }
+          q iam region list --query 'data[0].name' >/dev/null || { echo "::error::Oracle rejected the API key"; exit 1; }
+          for STATE in RUNNING PROVISIONING STARTING STOPPED; do
+            if [ -n "$(q compute instance list --compartment-id "$C" --display-name chimera --lifecycle-state $STATE --query 'data[0].id' || true)" ]; then
+              echo "::notice::Server 'chimera' already exists ($STATE). Nothing to do; set ORACLE_RETRY=off or disable this workflow."
+              exit 0
+            fi
+          done
+          VCN=$(q network vcn list --compartment-id "$C" --display-name chimera-vcn --lifecycle-state AVAILABLE --query 'data[0].id')
+          SUB=$(q network subnet list --compartment-id "$C" --vcn-id "$VCN" --display-name chimera-subnet --query 'data[0].id')
+          [ -n "$SUB" ] || { echo "::error::chimera-subnet not found; run deploy/oracle/provision.sh in Cloud Shell once"; exit 1; }
+          oci os object get -bn chimera-boot --name chimera.pub --file /tmp/chimera.pub >/dev/null 2>&1 \
+            || { echo "::error::bucket chimera-boot/chimera.pub not found"; exit 1; }
+          IMG=$(q compute image list --compartment-id "$C" --operating-system "Canonical Ubuntu" --operating-system-version "24.04" \
+                --shape VM.Standard.A1.Flex --sort-by TIMECREATED --sort-order DESC --query 'data[0].id')
+          ADS=$(q iam availability-domain list --compartment-id "$C" --query 'data[].name' | tr -d '[]",')
+          for AD in $ADS; do
+            for MEM in 6 4; do
+              if q compute instance launch --compartment-id "$C" --availability-domain "$AD" \
+                   --shape VM.Standard.A1.Flex --shape-config "{\"ocpus\":1,\"memoryInGBs\":$MEM}" \
+                   --image-id "$IMG" --subnet-id "$SUB" --assign-public-ip true --display-name chimera \
+                   --ssh-authorized-keys-file /tmp/chimera.pub --user-data-file deploy/oracle/install.sh \
+                   --query 'data."lifecycle-state"' >/dev/null; then
+                echo "::notice::Launched Chimera (A1, 1 OCPU / ${MEM} GB). It installs itself in about 10 minutes."
+                exit 0
+              fi
+              echo "${AD##*:} ${MEM}GB: no capacity"
+            done
+          done
+          echo "No free capacity this round; next try in 15 minutes."
