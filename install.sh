@@ -14,6 +14,7 @@
 #   CHIMERA_PUBLIC_URL     how attackers reach the decoy (default: http://<public IP>:<port>)
 #   CHIMERA_PORT           decoy port (default: 8000)
 #   CHIMERA_MODE           responder mode: approve (default) | dry_run | auto
+#   CHIMERA_ISOLATION_TTL  hours before an isolated address is released automatically (default: 168, 0 = never)
 #   CHIMERA_DISCORD_WEBHOOK / CHIMERA_SLACK_WEBHOOK   send alerts and the dashboard link there
 #   CHIMERA_TUNNEL         yes (default): private HTTPS dashboard link via a free Cloudflare quick tunnel
 #                          no: dashboard only on 127.0.0.1:9000 (reach it over SSH)
@@ -133,6 +134,7 @@ RESPONDER_MODE=${CHIMERA_MODE:-approve}
 RESPONDER_TRIGGER_SEVERITY=high
 RESPONDER_ACTIONS=blocklist
 RESPONDER_FEED_TOKEN=$(gen)
+RESPONDER_ISOLATION_TTL_HOURS=${CHIMERA_ISOLATION_TTL:-168}
 RESPONDER_PUBLIC_URL=http://127.0.0.1:9000
 EOF
   [ -n "${CHIMERA_DISCORD_WEBHOOK:-}" ] && echo "RESPONDER_DISCORD_WEBHOOK_URL=${CHIMERA_DISCORD_WEBHOOK}" >> .env

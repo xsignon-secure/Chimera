@@ -57,6 +57,7 @@ class Incident(BaseModel):
     timeline: list[dict[str, Any]] = Field(default_factory=list)
     actions: list[dict[str, Any]] = Field(default_factory=list)
     approval_nonce: str = Field(default_factory=lambda: secrets.token_urlsafe(16))
+    isolated_at: datetime | None = None
 
 
 def _now() -> datetime:
@@ -102,8 +103,12 @@ class IncidentStore:
         rows = await self.q("SELECT body FROM incidents ORDER BY updated DESC LIMIT ?", (limit,))
         return [Incident.model_validate_json(r[0]) for r in rows]
 
+    SEEN_KEEP = 200_000
+
     async def first_seen(self, event_id: str) -> bool:
         rows = await self.q("INSERT OR IGNORE INTO seen(event_id) VALUES (?) RETURNING event_id", (event_id,))
+        if rows and secrets.randbelow(1000) == 0:  # keep the de-duplication table bounded
+            await self.q("DELETE FROM seen WHERE rowid <= (SELECT MAX(rowid) FROM seen) - ?", (self.SEEN_KEEP,))
         return bool(rows)
 
     async def audit(self, incident: str, actor: str, action: str, detail: str = "") -> None:
@@ -137,6 +142,10 @@ class Responder:
             addr = ipaddress.ip_address(ip)
         except ValueError:
             return True  # never act on something that is not an IP
+        if addr.version == 6:
+            # IPv6 isolation blocks the whole /64 (see Actions), so refuse if it touches a protected range.
+            net = ipaddress.ip_network(f"{addr}/64", strict=False)
+            return any(net.version == n.version and net.overlaps(n) for n in self._protected)
         return any(addr in n for n in self._protected)
 
     async def ingest(self, event: Event) -> Incident | None:
@@ -229,6 +238,7 @@ class Responder:
             inc.actions.append({"ts": _now().isoformat(), "action": r.name, "ok": r.ok, "detail": r.detail})
         inc.status = "isolated" if any(r.ok for r in results) else "failed"
         inc.updated = _now()
+        inc.isolated_at = inc.updated if inc.status == "isolated" else None
         await self.store.audit(
             inc.id, actor, "isolate", "; ".join(f"{r.name}:{'ok' if r.ok else 'fail'}" for r in results)
         )
@@ -242,6 +252,7 @@ class Responder:
             "dry_run": "would be isolated (dry run)",
             "failed": "isolation FAILED",
             "blocked_by_policy": "is protected; isolation refused",
+            "released": "was released",
         }.get(inc.status, inc.status)
         text = (
             f"*[{inc.severity.upper()}] MCP honeypot incident {inc.id}*: `{inc.source_ip}` {verb}.\n"
@@ -281,6 +292,27 @@ class Responder:
             await self.store.save(inc)
             return inc
 
+    async def expire_isolations(self) -> list[str]:
+        """Release isolations older than ``isolation_ttl_hours``. Returns the released incident ids."""
+        ttl = self.settings.isolation_ttl_hours
+        if ttl <= 0:
+            return []
+        cutoff = _now().timestamp() - ttl * 3600
+        due = [
+            i.id
+            for i in await self.store.all(10_000)
+            if i.status == "isolated" and i.isolated_at is not None and i.isolated_at.timestamp() <= cutoff
+        ]
+        released = []
+        for iid in due:
+            try:
+                inc = await self.release(iid, actor=f"policy:ttl {ttl:g}h")
+            except (KeyError, ValueError):
+                continue
+            released.append(inc.id)
+            await self._notify(inc)
+        return released
+
     async def release(self, incident_id: str, actor: str) -> Incident:
         async with self._lock:
             inc = await self.store.get(incident_id)
@@ -295,6 +327,7 @@ class Responder:
                 )
             inc.status = "released"
             inc.updated = _now()
+            inc.isolated_at = None
             await self.store.audit(inc.id, actor, "released", inc.source_ip)
             await self.store.save(inc)
             return inc
