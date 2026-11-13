@@ -1,6 +1,7 @@
 # Keeps asking Oracle Cloud for an Always Free Ampere server until one is free, then launches
 # Chimera on it (deploy/oracle/install.sh runs as cloud-init). Costs nothing: GitHub Actions is
-# free for public repos and only Always Free shapes are requested. Stops itself once the server exists.
+# free for public repos and only Always Free shapes are requested. Each run retries every 5 minutes
+# for ~50 minutes, then queues the next run (cron is a backup); it stops once the server exists.
 #
 # Needs one repository secret, OCI_CONFIG: base64 of
 #   {"user":"ocid1.user...","tenancy":"ocid1.tenancy...","fingerprint":"aa:bb:...","region":"us-chicago-1","key":"-----BEGIN PRIVATE KEY-----..."}
@@ -16,6 +17,7 @@ on:
 
 permissions:
   contents: read
+  actions: write # lets a run re-queue itself; GitHub's cron alone proved unreliable
 
 concurrency:
   group: oracle-capacity
@@ -25,7 +27,7 @@ jobs:
   launch:
     if: vars.ORACLE_RETRY != 'off'
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
         with:
@@ -82,6 +84,10 @@ jobs:
           IMG=$(q compute image list --compartment-id "$C" --operating-system "Canonical Ubuntu" --operating-system-version "24.04" \
                 --shape VM.Standard.A1.Flex --sort-by TIMECREATED --sort-order DESC --query 'data[0].id')
           ADS=$(q iam availability-domain list --compartment-id "$C" --query 'data[].name' | tr -d '[]",')
+          END=$(( $(date +%s) + 50*60 ))
+          ROUND=0
+          while :; do
+          ROUND=$((ROUND+1))
           for AD in $ADS; do
             for MEM in 6 4; do
               if q compute instance launch --compartment-id "$C" --availability-domain "$AD" \
@@ -92,7 +98,17 @@ jobs:
                 echo "::notice::Launched Chimera (A1, 1 OCPU / ${MEM} GB). It installs itself in about 10 minutes."
                 exit 0
               fi
-              echo "${AD##*:} ${MEM}GB: no capacity"
+              echo "round $ROUND ${AD##*:} ${MEM}GB: no capacity"
             done
           done
-          echo "No free capacity this round; next try in 15 minutes."
+          [ $(( $(date +%s) + 300 )) -lt "$END" ] || break
+          sleep 300
+          done
+          echo "No free capacity in $ROUND rounds; queuing the next run."
+          echo "REQUEUE=1" >> "$GITHUB_ENV"
+
+      - name: Queue the next attempt
+        if: env.REQUEUE == '1' && vars.ORACLE_RETRY != 'off'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run oracle-capacity.yml --repo "$GITHUB_REPOSITORY" --ref main
