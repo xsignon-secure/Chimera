@@ -77,7 +77,7 @@ fi
 if ! command -v docker >/dev/null; then
   say "Installing Docker"
   case "$OS" in
-    *ubuntu*) pkg_install docker.io docker-compose-v2 ;;
+    *ubuntu*) pkg_install docker.io docker-compose-v2; pkg_install docker-buildx || true ;;
     *) curl -fsSL https://get.docker.com | sh >/dev/null ;;
   esac
 fi
