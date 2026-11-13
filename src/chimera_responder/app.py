@@ -17,9 +17,12 @@ import ipaddress
 import json
 import logging
 import secrets
+import time
+from collections import deque
 from collections.abc import AsyncIterator
 from typing import Annotated, Any
 
+import anyio
 from mcp.server.mcpserver import MCPServer
 from mcp.server.transport_security import TransportSecuritySettings
 from pydantic import Field, ValidationError
@@ -49,6 +52,33 @@ def _authorized_basic(request: Request, password: str) -> bool:
     except ValueError:
         return False
     return _same(user, b"admin") & _same(pw, password.encode())
+
+
+class AuthThrottle:
+    """Slows password guessing on the dashboard.
+
+    The dashboard is often reached through a tunnel, so every visitor shares one source
+    address; the limit is therefore global. After ``limit`` failures in ``window`` seconds,
+    sign-in is refused (HTTP 429) until the window drains. The generated admin password is
+    long enough that this only matters for weak, hand-set passwords, and it caps the noise.
+    """
+
+    def __init__(self, limit: int = 20, window: float = 60.0) -> None:
+        self.limit, self.window = limit, window
+        self.failures: deque[float] = deque()
+
+    def _drain(self) -> None:
+        now = time.monotonic()
+        while self.failures and now - self.failures[0] > self.window:
+            self.failures.popleft()
+
+    def locked(self) -> bool:
+        self._drain()
+        return len(self.failures) >= self.limit
+
+    def fail(self) -> None:
+        self._drain()
+        self.failures.append(time.monotonic())
 
 
 def _same(a: bytes | str, b: bytes | str) -> bool:
@@ -117,9 +147,10 @@ def _buttons(inc: Incident) -> str:
     return " ".join(out)
 
 
-def _page(title: str, body: str) -> HTMLResponse:
+def _page(title: str, body: str, refresh: int = 0) -> HTMLResponse:
+    meta = f"<meta http-equiv=refresh content={refresh}>" if refresh else ""
     return HTMLResponse(
-        f"<!doctype html><html><head><meta charset=utf-8><meta name=viewport "
+        f"<!doctype html><html><head><meta charset=utf-8>{meta}<meta name=viewport "
         f"content='width=device-width,initial-scale=1'><title>{html.escape(title)}</title>"
         f"<style>{_CSS}</style></head><body><main>{body}</main></body></html>",
         headers={
@@ -259,6 +290,18 @@ def create_app(settings: ResponderSettings | None = None, responder: Responder |
         host=s.host,
     )
 
+    throttle = AuthThrottle()
+
+    def denied(request: Request) -> Response | None:
+        """None when the request carries the admin password; otherwise the response to send."""
+        if throttle.locked():
+            return PlainTextResponse("Too many failed sign-ins, try again in a minute", status_code=429)
+        if _authorized_basic(request, s.admin_password):
+            return None
+        if request.headers.get("authorization"):
+            throttle.fail()
+        return _challenge()
+
     async def alerts(request: Request) -> Response:
         if not s.honeypot_secret:
             return JSONResponse({"error": "RESPONDER_HONEYPOT_SECRET not configured"}, status_code=503)
@@ -275,8 +318,8 @@ def create_app(settings: ResponderSettings | None = None, responder: Responder |
         return JSONResponse({"incident": inc.id if inc else None, "status": inc.status if inc else None})
 
     async def dashboard(request: Request) -> Response:
-        if not _authorized_basic(request, s.admin_password):
-            return _challenge()
+        if (no := denied(request)) is not None:
+            return no
         incidents = await r.store.all()
         rows = (
             "".join(
@@ -296,11 +339,11 @@ def create_app(settings: ResponderSettings | None = None, responder: Responder |
             f"<th>Tools used</th><th>Client</th><th></th></tr>{rows}</table></div>"
             "<p class=muted><a href='/audit'>Audit log</a></p>"
         )
-        return _page("Chimera Responder", body)
+        return _page("Chimera Responder", body, refresh=30)
 
     async def incident(request: Request) -> Response:
-        if not _authorized_basic(request, s.admin_password):
-            return _challenge()
+        if (no := denied(request)) is not None:
+            return no
         inc = await r.store.get(request.path_params["iid"])
         if inc is None:
             return PlainTextResponse("Not found", status_code=404)
@@ -335,8 +378,8 @@ def create_app(settings: ResponderSettings | None = None, responder: Responder |
         return _page(inc.id, body)
 
     async def act(request: Request) -> Response:
-        if not _authorized_basic(request, s.admin_password):
-            return _challenge()
+        if (no := denied(request)) is not None:
+            return no
         form = await request.form()
         nonce = str(form.get("nonce", ""))
         iid, verb = request.path_params["iid"], request.path_params["verb"]
@@ -359,8 +402,8 @@ def create_app(settings: ResponderSettings | None = None, responder: Responder |
         return RedirectResponse(f"/incidents/{iid}", status_code=303)
 
     async def audit(request: Request) -> Response:
-        if not _authorized_basic(request, s.admin_password):
-            return _challenge()
+        if (no := denied(request)) is not None:
+            return no
         rows = "".join(
             f"<tr><td class=muted>{html.escape(a['ts'][:19])}</td><td>{html.escape(a['incident'])}</td>"
             f"<td>{html.escape(a['actor'])}</td><td>{html.escape(a['action'])}</td>"
@@ -375,7 +418,8 @@ def create_app(settings: ResponderSettings | None = None, responder: Responder |
         )
 
     async def feed(request: Request) -> Response:
-        token = request.query_params.get("token", "")
+        auth = request.headers.get("authorization", "")
+        token = auth[7:].strip() if auth.lower().startswith("bearer ") else request.query_params.get("token", "")
         if not s.feed_token or not _same(token, s.feed_token):
             return PlainTextResponse("Unauthorized", status_code=401)
         return PlainTextResponse(r.actions.blocklist_path.read_text(), headers={"Cache-Control": "no-store"})
@@ -386,12 +430,25 @@ def create_app(settings: ResponderSettings | None = None, responder: Responder |
             return PlainTextResponse("Not Found", status_code=404)
         return JSONResponse({"status": "ok", "mode": s.mode})
 
+    async def expiry_loop() -> None:
+        while True:
+            try:
+                released = await r.expire_isolations()
+                if released:
+                    log.info("isolation TTL released %s", ", ".join(released))
+            except Exception:  # noqa: BLE001 - keep the loop alive
+                log.exception("isolation expiry failed")
+            await anyio.sleep(60)
+
     @contextlib.asynccontextmanager
     async def lifespan(_: Starlette) -> AsyncIterator[None]:
         if not s.admin_password:
             log.warning("RESPONDER_ADMIN_PASSWORD is empty: dashboard is locked")
-        async with mcp_app.router.lifespan_context(mcp_app):
+        async with mcp_app.router.lifespan_context(mcp_app), anyio.create_task_group() as tg:
+            if s.isolation_ttl_hours > 0:
+                tg.start_soon(expiry_loop)
             yield
+            tg.cancel_scope.cancel()
 
     app = Starlette(
         routes=[

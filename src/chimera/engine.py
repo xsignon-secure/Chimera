@@ -3,6 +3,7 @@ implements the sensor that observes every MCP message."""
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import logging
@@ -11,12 +12,13 @@ import time
 from collections import defaultdict, deque
 from contextvars import ContextVar
 from typing import Any
+from urllib.parse import parse_qsl, unquote_plus
 
 import anyio
 
 from chimera import __version__
 from chimera.canary import CanaryHit, CanaryWatermarker
-from chimera.config import Settings
+from chimera.config import Settings, Severity
 from chimera.detect import (
     RECON_ATTACK,
     extract_indicators,
@@ -330,21 +332,89 @@ class Engine:
             )
         )
 
-    async def http_probe(self, path: str, method: str, ip: str, port: int | None, headers: dict[str, str]) -> None:
+    async def http_probe(
+        self,
+        path: str,
+        method: str,
+        ip: str,
+        port: int | None,
+        headers: dict[str, str],
+        query: str = "",
+        body: bytes = b"",
+    ) -> bool:
+        """Record a non-MCP HTTP request. Returns True when it was a sign-in attempt.
+
+        Stolen canaries often come back here rather than over MCP: a password typed into
+        the decoy sign-in page, a token in an ``Authorization`` header, a key in the query
+        string. All of those are scanned, so reuse is caught on every surface.
+        """
+        session_id = self.session_key(ip, headers, {})
+        form = _parse_form(body, headers.get("content-type", ""))
+        login = method == "POST" and path.rstrip("/") in {"/login", "/admin", ""} and bool(form)
+        text = "\n".join(
+            [
+                unquote_plus(query)[:4096],
+                body.decode(errors="replace") if not form else "",
+                *form.values(),
+                *(headers.get(h, "")[:4096] for h in _CREDENTIAL_HEADERS),
+                _basic_auth(headers.get("authorization", "")),
+            ]
+        )
+        reused = _attribute(self.canaries.hits(text), session_id)
+        user = _clip(form.get("username") or form.get("user") or form.get("email") or "", 128) if login else ""
+        severity: Severity = "high" if reused else ("medium" if login else "low")
+        what = f"sign-in attempt as {user or '(blank)'!r}" if login else f"{method} {path[:200]}"
         await self.telemetry.emit(
             Event(
                 kind="http.probe",
-                severity="low",
+                severity=severity,
                 profile=self.profile.key,
-                session_id=self.session_key(ip, headers, {}),
+                session_id=session_id,
                 source_ip=ip,
                 source_port=port,
                 transport="http",
-                method=method,
-                mitre_attack=["T1595.002"],
-                message=f"{method} {path[:200]} (UA: {headers.get('user-agent', '-')[:80]})",
+                method=_clip(method, 16),
+                arguments={"path": path[:200], "username": user} if login else None,
+                canary_ids=sorted({h.canary_id for h in reused}),
+                mitre_attack=["T1078", "T1110"] if login else ["T1595.002"],
+                message=f"{what} (UA: {headers.get('user-agent', '-')[:80]})"
+                + (" using a stolen canary credential" if reused else ""),
             )
         )
+        if reused:
+            await self._emit_reuse(reused, session_id, ip, None)
+        return login
+
+
+_CREDENTIAL_HEADERS = ("authorization", "cookie", "x-api-key", "x-amz-security-token", "x-vault-token", "private-token")
+
+
+def _basic_auth(header: str) -> str:
+    """Decoded ``user:password`` of an HTTP Basic header, so canary passwords inside it are seen."""
+    if not header.lower().startswith("basic "):
+        return ""
+    try:
+        return base64.b64decode(header[6:].strip()[:4096], validate=True).decode(errors="replace")
+    except ValueError:
+        return ""
+
+
+def _parse_form(body: bytes, content_type: str) -> dict[str, str]:
+    """Fields of an urlencoded or JSON body (bounded); empty for anything else."""
+    if not body:
+        return {}
+    ctype = content_type.split(";", 1)[0].strip().lower()
+    try:
+        if ctype == "application/x-www-form-urlencoded":
+            pairs = parse_qsl(body.decode(errors="replace"), keep_blank_values=True)[:32]
+            return {_clip(k, 64): v[:2048] for k, v in pairs}
+        if ctype == "application/json":
+            data = json.loads(body)
+            if isinstance(data, dict):
+                return {_clip(k, 64): str(v)[:2048] for k, v in list(data.items())[:32]}
+    except ValueError:
+        return {}
+    return {}
 
 
 def _clip(value: object, limit: int = 256) -> str:

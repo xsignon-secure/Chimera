@@ -88,13 +88,38 @@ _INJECTION_PATTERNS = [
 ]
 _INJECTION_RE = [re.compile(p, re.IGNORECASE) for p in _INJECTION_PATTERNS]
 _URL_RE = re.compile(r"\b(?:https?|s3|gs|ftp|wss?)://[^\s'\"<>]+", re.IGNORECASE)
-_EMAIL_RE = re.compile(r"\b[\w.+-]+@[\w-]+\.[\w.-]+\b")
+_EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+")
+_EMAIL_TOKEN_RE = re.compile(r"[\w.+@-]++")
 _IP_RE = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
-_DOMAIN_RE = re.compile(
-    r"\b(?:[a-z0-9-]{1,63}\.)+(?:com|net|org|io|ru|cn|xyz|top|app|dev|cloud|site|info|"
-    r"biz|co|me|sh|link|online|tk|pw|cc|su)\b",
-    re.IGNORECASE,
-)
+# Linear-time domain extraction. A single regex with a repeated "(label\.)+" group
+# followed by a TLD backtracks quadratically on inputs like "a.a.a.a..." (20 KB took
+# ~10 s of event-loop time), so match dotted tokens possessively and check TLDs in Python.
+_DOTTED_RE = re.compile(r"[A-Za-z0-9-]++(?:\.[A-Za-z0-9-]++)++")
+_TLDS = frozenset("com net org io ru cn xyz top app dev cloud site info biz co me sh link online tk pw cc su".split())
+
+
+def _domains(text: str) -> set[str]:
+    out: set[str] = set()
+    for m in _DOTTED_RE.finditer(text):
+        labels = m.group(0).lower().split(".")
+        for i in range(len(labels) - 1, 0, -1):
+            if labels[i] not in _TLDS:
+                continue
+            kept = labels[: i + 1]
+            if sum(map(len, kept)) + i <= 253 and all(0 < len(lb) <= 63 for lb in kept):
+                out.add(".".join(kept))
+            break
+    return out
+
+
+def _emails(text: str) -> set[str]:
+    """Emails, in linear time: only short tokens that contain "@" reach the full regex."""
+    out: set[str] = set()
+    for m in _EMAIL_TOKEN_RE.finditer(text):
+        tok = m.group(0)
+        if "@" in tok and len(tok) <= 320:
+            out.update(e.strip(".") for e in _EMAIL_RE.findall(tok))
+    return out
 
 
 def flatten(value: Any, limit: int = 20000) -> str:
@@ -133,7 +158,7 @@ def extract_indicators(text: str, extra_urls: Iterable[str] = (), ignore_hosts: 
             ips.add(candidate)
         except ValueError:
             continue
-    domains = {d.lower() for d in _DOMAIN_RE.findall(text)}
+    domains = _domains(text)
     for u in urls:
         m = re.match(r"^[a-z0-9]+://([^/:?#]+)", u, re.IGNORECASE)
         if m:
@@ -145,7 +170,7 @@ def extract_indicators(text: str, extra_urls: Iterable[str] = (), ignore_hosts: 
         urls=urls,
         domains=sorted(domains),
         ips=sorted(ips),
-        emails=sorted(set(_EMAIL_RE.findall(text))),
+        emails=sorted(_emails(text)),
         prompt_injection_markers=markers,
     )
 

@@ -40,6 +40,9 @@ class ResponderSettings(BaseModel):
     Requests from them to the dashboard, MCP endpoint or feed get 404, so a compromised
     honeypot cannot reach the Blue Team console."""
     max_isolations_per_hour: int = 10
+    isolation_ttl_hours: float = 0
+    """Release isolations automatically after this many hours (0 = keep until an analyst releases).
+    Attackers often use cloud or residential addresses that later belong to someone else."""
     actions: list[str] = Field(default_factory=lambda: ["blocklist"])
     """Any of: blocklist, webhook, wazuh."""
     slack_webhook_url: str = ""
@@ -107,6 +110,8 @@ class ResponderSettings(BaseModel):
             v["port"] = int(_env("PORT"))
         if _env("MAX_ISOLATIONS_PER_HOUR"):
             v["max_isolations_per_hour"] = int(_env("MAX_ISOLATIONS_PER_HOUR"))
+        if _env("ISOLATION_TTL_HOURS"):
+            v["isolation_ttl_hours"] = float(_env("ISOLATION_TTL_HOURS"))
         if _env("DATA_DIR"):
             v["data_dir"] = Path(_env("DATA_DIR"))
         if _env("ACTIONS"):

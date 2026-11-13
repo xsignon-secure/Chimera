@@ -103,8 +103,10 @@ class Telemetry:
         self.store = store
         self.version = version
         self.guard = EgressGuard(settings.egress_allowlist)
-        self._queue: asyncio.Queue[Event] | None = None
-        self._worker: asyncio.Task[None] | None = None
+        # One queue and worker per sink, so a slow or unreachable sink (a chat webhook the
+        # host cannot reach, a dead syslog relay) never delays containment alerts to the responder.
+        self._queues: dict[str, asyncio.Queue[Event]] = {}
+        self._workers: list[asyncio.Task[None]] = []
         self._jsonl: Path = settings.events_path
         self._jsonl.parent.mkdir(parents=True, exist_ok=True)
         self._syslog: tuple[str, int] | None = None
@@ -124,19 +126,38 @@ class Telemetry:
         s = self.settings
         return bool(s.webhook_url or s.slack_webhook_url or s.discord_webhook_url or self._syslog)
 
+    def _sinks(self) -> list[str]:
+        s = self.settings
+        return [
+            name
+            for name, on in (
+                ("webhook", s.webhook_url),
+                ("slack", s.slack_webhook_url),
+                ("discord", s.discord_webhook_url),
+                ("syslog", self._syslog),
+            )
+            if on
+        ]
+
     async def start(self) -> None:
-        if self.remote_enabled and self._worker is None:
-            self._queue = asyncio.Queue(maxsize=10_000)
-            self._worker = asyncio.create_task(self._run(), name="chimera-telemetry")
+        if self._workers:
+            return
+        for name in self._sinks():
+            q: asyncio.Queue[Event] = asyncio.Queue(maxsize=10_000)
+            self._queues[name] = q
+            self._workers.append(asyncio.create_task(self._run(name, q), name=f"chimera-telemetry-{name}"))
 
     async def stop(self) -> None:
-        if self._queue is not None and self._worker is not None:
-            try:
-                await asyncio.wait_for(self._queue.join(), timeout=5)
-            except TimeoutError:
-                pass
-            self._worker.cancel()
-            self._worker = None
+        if not self._workers:
+            return
+        try:
+            await asyncio.wait_for(asyncio.gather(*(q.join() for q in self._queues.values())), timeout=5)
+        except TimeoutError:
+            pass
+        for w in self._workers:
+            w.cancel()
+        self._workers = []
+        self._queues = {}
 
     async def emit(self, event: Event) -> None:
         await self.store.add_event(event)
@@ -148,11 +169,12 @@ class Telemetry:
         await anyio.to_thread.run_sync(self._append, line)
         if self.settings.log_stdout:
             print(line, file=sys.stdout, flush=True)
-        if self._queue is not None and SEVERITY_RANK[event.severity] >= SEVERITY_RANK[self.settings.alert_min_severity]:
-            try:
-                self._queue.put_nowait(event)
-            except asyncio.QueueFull:
-                log.warning("alert queue full; dropping remote alert %s", event.id)
+        if self._queues and SEVERITY_RANK[event.severity] >= SEVERITY_RANK[self.settings.alert_min_severity]:
+            for name, q in self._queues.items():
+                try:
+                    q.put_nowait(event)
+                except asyncio.QueueFull:
+                    log.warning("%s alert queue full; dropping remote alert %s", name, event.id)
 
     def _append(self, line: str) -> None:
         try:
@@ -167,20 +189,22 @@ class Telemetry:
         with self._jsonl.open("a", encoding="utf-8") as fh:
             fh.write(line + "\n")
 
-    async def _run(self) -> None:
-        assert self._queue is not None
+    async def _run(self, sink: str, queue: asyncio.Queue[Event]) -> None:
         async with self.guard.client(timeout=5.0) as client:
             while True:
-                event = await self._queue.get()
+                event = await queue.get()
                 try:
-                    await self._dispatch(client, event)
+                    await self._dispatch(client, event, sink)
+                except Exception:  # noqa: BLE001 - a sink bug must never kill its worker
+                    log.exception("alert sink %s failed", sink)
                 finally:
-                    self._queue.task_done()
+                    queue.task_done()
 
-    async def _dispatch(self, client: httpx.AsyncClient, event: Event) -> None:
+    async def _dispatch(self, client: httpx.AsyncClient, event: Event, sink: str | None = None) -> None:
+        """Deliver one event to one sink (or to every configured sink when ``sink`` is None)."""
         s = self.settings
         body = event.model_dump_json().encode()
-        if s.webhook_url:
+        if s.webhook_url and sink in (None, "webhook"):
             if len(body) > WEBHOOK_MAX_BYTES:
                 body = event.compact().model_dump_json().encode()
             headers = {"Content-Type": "application/json", "User-Agent": f"chimera/{self.version}"}
@@ -193,15 +217,15 @@ class Telemetry:
                 if s.webhook_secret:
                     headers.update(sign(s.webhook_secret, small))
                 await self._post(client, s.webhook_url, content=small, headers=headers)
-        if s.slack_webhook_url:
+        if s.slack_webhook_url and sink in (None, "slack"):
             await self._post(client, s.slack_webhook_url, json={"text": chat_text(event)})
-        if s.discord_webhook_url:
+        if s.discord_webhook_url and sink in (None, "discord"):
             await self._post(
                 client,
                 s.discord_webhook_url,
                 json={"content": chat_text(event).replace("*", "**")[:1900], "allowed_mentions": {"parse": []}},
             )
-        if self._syslog:
+        if self._syslog and sink in (None, "syslog"):
             msg = (
                 f"<{_syslog_pri(event.severity)}>1 {event.timestamp.isoformat()} chimera chimera - - - "
                 f"{to_cef(event, self.version)}"

@@ -111,6 +111,8 @@ class RateLimitMiddleware:
         await self.app(scope, receive, send)
 
 
+_MAX_PROBE_BODY = 16 * 1024
+
 _LOGIN_PAGE = """<!doctype html><html><head><title>{name} | Sign in</title></head>
 <body style="font-family:sans-serif;max-width:420px;margin:80px auto">
 <h2>{name}</h2><p>Sign in with your corporate SSO account to continue.</p>
@@ -214,9 +216,21 @@ class ChimeraApp:
                     headers={"x-amz-request-id": rid},
                 )
             return HTMLResponse(_LOGIN_PAGE.format(name="Single Sign-On"))
-        await self.engine.http_probe(path, request.method, ip, port, headers)
+        body = b""
+        if request.method in {"POST", "PUT", "PATCH"}:
+            async for chunk in request.stream():  # bounded: stolen credentials are short
+                body += chunk
+                if len(body) >= _MAX_PROBE_BODY:
+                    body = body[:_MAX_PROBE_BODY]
+                    break
+        failed_login = await self.engine.http_probe(
+            path, request.method, ip, port, headers, query=request.url.query, body=body
+        )
         if path in {"/", "/login", "/admin"}:
-            return HTMLResponse(_LOGIN_PAGE.format(name=self.engine.server_name))
+            page = _LOGIN_PAGE.format(name=self.engine.server_name)
+            if failed_login:
+                page = page.replace("<form", '<p style="color:#b42318">Invalid username or password.</p><form', 1)
+            return HTMLResponse(page, status_code=401 if failed_login else 200)
         if path == "/.well-known/mcp.json" or path == "/.well-known/mcp":
             return JSONResponse(
                 {

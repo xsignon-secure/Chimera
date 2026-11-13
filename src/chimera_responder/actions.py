@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import logging
 import re
@@ -36,6 +37,18 @@ def wazuh_timeout(command: str) -> int:
         return 0
     digits = re.search(r"(\d+)$", command)
     return int(digits.group(1)) if digits else 0
+
+
+def blocklist_entry(ip: str) -> str:
+    """The feed entry for an address. IPv6 attackers get a whole /64 (one subscriber's
+    allocation), because blocking a single address is defeated by rotating within it."""
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return ip
+    if addr.version == 6:
+        return str(ipaddress.ip_network(f"{addr}/64", strict=False))
+    return str(addr)
 
 
 def _wazuh_failure(item: dict[str, Any]) -> str:
@@ -126,12 +139,15 @@ class Actions:
 
     # ------------------------------------------------------------------
     async def _blocklist(self, ip: str, add: bool) -> ActionResult:
+        entry = blocklist_entry(ip)
+
         def edit() -> None:
             lines = {ln.strip() for ln in self.blocklist_path.read_text().splitlines() if ln.strip()}
             if add:
-                lines.add(ip)
+                lines.add(entry)
             else:
-                lines.discard(ip)
+                lines.discard(entry)
+                lines.discard(ip)  # entries written before /64 aggregation
             tmp = self.blocklist_path.with_suffix(".tmp")
             tmp.write_text("\n".join(sorted(lines)) + ("\n" if lines else ""))
             tmp.replace(self.blocklist_path)
@@ -140,7 +156,7 @@ class Actions:
         return ActionResult(
             name="blocklist",
             ok=True,
-            detail=f"{'added' if add else 'removed'} {ip} {'to' if add else 'from'} blocklist feed",
+            detail=f"{'added' if add else 'removed'} {entry} {'to' if add else 'from'} blocklist feed",
         )
 
     async def _webhook(self, action: str, ip: str, incident_id: str, context: dict[str, Any]) -> ActionResult:

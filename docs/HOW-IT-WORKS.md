@@ -21,7 +21,7 @@ Everything the decoy says comes from a **fake world** derived from `CHIMERA_SEED
 
 | Detection | How |
 |---|---|
-| **Reuse** | Any issued value appearing in a later request, from any session or IP, raises `canary.reused`. Reuse from a *different* session is critical (credential sharing or lateral movement). |
+| **Reuse** | Any issued value appearing in a later request, from any session or IP, raises `canary.reused`. Reuse from a *different* session is critical (credential sharing or lateral movement). Every surface is scanned: MCP tool arguments, and on plain HTTP the query string, form or JSON body (a password typed into the decoy sign-in page), `Authorization` (Bearer and decoded Basic), `Cookie`, `X-API-Key`, `X-Vault-Token` and `X-Amz-Security-Token`. |
 | **Callback** | Sign-in, impersonation and export links point back at the decoy. Opening one raises `canary.triggered` with the opener's IP: **high** from the IP that stole it, **medium** from anywhere else (a link-preview bot or a colleague must never trigger isolation on their own). |
 | **External** | Load real Canarytokens AWS keys with `CHIMERA_CANARYTOKENS_FILE`. If the attacker uses one against AWS, canarytokens.org alerts you. `chimera canaries` shows which session stole that key. |
 
@@ -29,7 +29,9 @@ Get free AWS-key Canarytokens at <https://canarytokens.org>: choose *AWS keys*, 
 
 ## Telemetry
 
-Every MCP message (discovery, `tools/list`, calls, malformed requests) and every non-MCP HTTP probe becomes an ECS-style event. Each event carries `mitre_attack`, `mitre_atlas`, `canary_ids`, `fingerprint`, `indicators` (URLs, domains, IPs, emails, prompt-injection markers) and a SHA-256 of the raw params. Events are written to SQLite, `events.jsonl` and stdout **before** the attacker gets a response. Remote sinks are fed from a background queue, so a slow SIEM never creates a timing tell.
+Every MCP message (discovery, `tools/list`, calls, malformed requests) and every non-MCP HTTP probe becomes an ECS-style event. Each event carries `mitre_attack`, `mitre_atlas`, `canary_ids`, `fingerprint`, `indicators` (URLs, domains, IPs, emails, prompt-injection markers) and a SHA-256 of the raw params. Events are written to SQLite, `events.jsonl` and stdout **before** the attacker gets a response. Remote sinks are fed from background queues, one per sink, so a slow SIEM never creates a timing tell and an unreachable chat webhook never delays the containment alert to the responder.
+
+Sign-in attempts on the decoy web page are recorded with the username (never the password, unless it is a canary) as `http.probe` events at medium severity, mapped to T1078 and T1110.
 
 | Sink | Setting |
 |---|---|
@@ -54,12 +56,15 @@ The following safety rails apply in every mode:
 * A released or failed incident re-opens if the same host attacks again, and a dismissed one re-opens on a critical event, so a returning attacker is never silently ignored.
 * Every decision, human or automatic, goes into an audit log.
 * Dashboard actions require a per-incident nonce, which protects against CSRF and stale clicks.
+* `RESPONDER_ISOLATION_TTL_HOURS` releases isolations automatically (the installer sets 7 days; 0 keeps them until an analyst releases). Attacker addresses are often cloud or residential IPs that later belong to someone innocent. A host that attacks again after release is contained again.
+* IPv6 attackers are blocked as their whole /64, since one subscriber can rotate freely within it, and a /64 that touches a protected range is refused.
+* After 20 failed dashboard sign-ins in a minute, sign-in pauses for a minute (HTTP 429), which caps password guessing through the public tunnel link.
 
 Containment backends (`RESPONDER_ACTIONS`, all free):
 
 | Action | What it does |
 |---|---|
-| `blocklist` | Maintains `/feeds/blocklist.txt?token=…`. pfSense/OPNsense URL-table aliases, FortiGate external threat feeds, nginx, fail2ban and most firewalls can consume it. |
+| `blocklist` | Maintains `/feeds/blocklist.txt` (send `Authorization: Bearer <RESPONDER_FEED_TOKEN>`, or `?token=…` for firewalls that cannot set headers). pfSense/OPNsense URL-table aliases, FortiGate external threat feeds, nginx, fail2ban and most firewalls can consume it. |
 | `webhook` | Signed JSON to any SOAR (Shuffle, n8n, Tines community) for EDR host isolation or NAC quarantine. |
 | `wazuh` | Calls the Wazuh 4.x API active-response endpoint, which drops the source IP in the firewall of the agents you choose. Tested end to end against a real Wazuh 4.14 manager and agent. A call that reaches zero agents is reported as a failure, never as isolated. |
 
