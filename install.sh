@@ -22,7 +22,7 @@
 set -Eeuo pipefail
 
 REPO="xsignon-secure/Honeypot-MCP"
-VERSION="${CHIMERA_VERSION:-main}"
+CH_REF="${CHIMERA_VERSION:-main}"
 DIR="${CHIMERA_DIR:-/opt/chimera}"
 PORT="${CHIMERA_PORT:-8000}"
 TUNNEL="${CHIMERA_TUNNEL:-yes}"
@@ -40,9 +40,10 @@ exec > >(tee -a "$LOG") 2>&1
 case "$PORT" in '' | *[!0-9]*) die "CHIMERA_PORT must be a number" ;; esac
 case "${CHIMERA_MODE:-approve}" in approve | dry_run | auto) ;; *) die "CHIMERA_MODE must be approve, dry_run or auto" ;; esac
 
-. /etc/os-release 2>/dev/null || true
-OS="${ID:-unknown} ${ID_LIKE:-}"
-say "Installing Project Chimera ($VERSION) on ${PRETTY_NAME:-Linux} into $DIR"
+# Read the distro in a subshell so /etc/os-release cannot overwrite our variables (it defines VERSION, NAME...).
+OS=$(. /etc/os-release 2>/dev/null; echo "${ID:-unknown} ${ID_LIKE:-}")
+DISTRO=$(. /etc/os-release 2>/dev/null; echo "${PRETTY_NAME:-Linux}")
+say "Installing Project Chimera ($CH_REF) on $DISTRO into $DIR"
 
 pkg_install() {
   if command -v apt-get >/dev/null; then
@@ -96,7 +97,7 @@ docker info >/dev/null 2>&1 || die "Docker is installed but not running"
 say "Downloading Chimera"
 mkdir -p "$DIR"
 TMP=$(mktemp -d)
-curl -fsSL "https://github.com/$REPO/archive/$VERSION.tar.gz" | tar -xz -C "$TMP" --strip-components=1
+curl -fsSL "https://github.com/$REPO/archive/$CH_REF.tar.gz" | tar -xz -C "$TMP" --strip-components=1
 cp -a "$TMP"/. "$DIR"/
 rm -rf "$TMP"
 cd "$DIR"
