@@ -68,6 +68,14 @@ Containment backends (`RESPONDER_ACTIONS`, all free):
 | `webhook` | Signed JSON to any SOAR (Shuffle, n8n, Tines community) for EDR host isolation or NAC quarantine. |
 | `wazuh` | Calls the Wazuh 4.x API active-response endpoint, which drops the source IP in the firewall of the agents you choose. Tested end to end against a real Wazuh 4.14 manager and agent. A call that reaches zero agents is reported as a failure, never as isolated. |
 
+**Sensor health.** The honeypot sends a signed heartbeat every `CHIMERA_HEARTBEAT_SECONDS` (60 by default) with its alert-delivery counters. If none arrives for `RESPONDER_SENSOR_SILENCE_MINUTES` (5), the responder raises one urgent notification ("the decoy may be down or cut off"), and another when it comes back. The dashboard shows the sensor state at the top.
+
+**Phone alerts.** Set `RESPONDER_NTFY_URL` (or run `sudo chimera-ctl phone`) and install the free [ntfy](https://ntfy.sh) app. Incidents that need approval, isolations and failures arrive as urgent pushes that open the incident when tapped. Use a long secret topic name, or a self-hosted ntfy server, because anyone who knows the topic can read it.
+
+**Metrics.** `GET /metrics` with `Authorization: Bearer $RESPONDER_METRICS_TOKEN` returns Prometheus text: incidents by status and severity, alerts accepted and rejected, isolations, and sensor liveness, delivery failures and queue depth. Point Prometheus, Grafana Agent or any OpenMetrics scraper at it.
+
+**Search and export.** The dashboard filters incidents by free text (IP, incident id, tool, client, MITRE technique, IOC, canary), status and severity, and exports the current view as CSV (spreadsheet formulas neutralised) or JSON.
+
 **Blue Team MCP.** The responder also *is* an MCP server (`/mcp/`, bearer token `RESPONDER_MCP_TOKEN`), with tools `list_incidents`, `get_incident`, `approve_isolation`, `reject_isolation`, `release_isolation` and `get_audit_log`. A defender's AI agent can triage and act, with the same safety rails as the dashboard. Everything the attacker wrote (tool arguments, client names, messages) is returned under `untrusted_attacker_data` with an explicit notice, so an attacker cannot prompt-inject your defending agent through the evidence.
 
 ```bash

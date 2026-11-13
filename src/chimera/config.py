@@ -70,6 +70,10 @@ class Settings(BaseModel):
     egress_allowlist: list[str] = Field(default_factory=list)
     """Hostnames the honeypot may contact. Webhook hosts are added automatically."""
 
+    heartbeat_seconds: int = 60
+    """How often the honeypot tells the responder it is alive (0 disables). Lets the responder
+    alert when the sensor goes silent, and report alert-delivery health on its metrics page."""
+
     alert_min_severity: Severity = "medium"
 
     # Retention (bounded disk use)
@@ -162,6 +166,7 @@ class Settings(BaseModel):
             "max_events": "MAX_EVENTS",
             "canary_retention_days": "CANARY_RETENTION_DAYS",
             "max_canaries": "MAX_CANARIES",
+            "heartbeat_seconds": "HEARTBEAT_SECONDS",
         }.items():
             raw = _env(env)
             if raw:

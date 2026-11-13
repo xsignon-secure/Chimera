@@ -18,6 +18,7 @@ EventKind = Literal[
     "canary.reused",  # a tripwire came back inside a later request
     "canary.triggered",  # a tripwire was used out-of-band (callback hit / Canarytokens alert)
     "http.probe",  # non-MCP HTTP probing of the decoy
+    "sensor.heartbeat",  # periodic liveness + delivery counters, honeypot -> responder only
 ]
 
 

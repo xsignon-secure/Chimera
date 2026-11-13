@@ -146,6 +146,8 @@ class Telemetry:
             q: asyncio.Queue[Event] = asyncio.Queue(maxsize=10_000)
             self._queues[name] = q
             self._workers.append(asyncio.create_task(self._run(name, q), name=f"chimera-telemetry-{name}"))
+        if self.settings.webhook_url and self.settings.heartbeat_seconds > 0:
+            self._workers.append(asyncio.create_task(self._heartbeat(), name="chimera-heartbeat"))
 
     async def stop(self) -> None:
         if not self._workers:
@@ -231,6 +233,36 @@ class Telemetry:
                 f"{to_cef(event, self.version)}"
             )
             await anyio.to_thread.run_sync(self._send_udp, msg.encode()[:8192])
+
+    def heartbeat_event(self) -> Event:
+        depth = {name: q.qsize() for name, q in self._queues.items()}
+        return Event(
+            kind="sensor.heartbeat",
+            profile=self.settings.profile,
+            arguments={
+                "version": self.version,
+                "alerts_sent_ok": self.sent_ok,
+                "alerts_sent_failed": self.sent_failed,
+                "queue_depth": sum(depth.values()),
+                "interval_seconds": self.settings.heartbeat_seconds,
+            },
+            message=f"sensor alive: {self.sent_ok} alerts delivered, {self.sent_failed} failed",
+        )
+
+    async def _heartbeat(self) -> None:
+        """Signed liveness ping straight to the responder; never stored, never sent to chat sinks."""
+        s = self.settings
+        async with self.guard.client(timeout=5.0) as client:
+            while True:
+                await asyncio.sleep(s.heartbeat_seconds)
+                body = self.heartbeat_event().model_dump_json().encode()
+                headers = {"Content-Type": "application/json", "User-Agent": f"chimera/{self.version}"}
+                if s.webhook_secret:
+                    headers.update(sign(s.webhook_secret, body))
+                try:
+                    await client.post(s.webhook_url, content=body, headers=headers)
+                except (httpx.HTTPError, PermissionError, OSError) as exc:
+                    log.warning("heartbeat failed: %s", type(exc).__name__)
 
     async def _post(self, client: httpx.AsyncClient, url: str, **kwargs: Any) -> int:
         """POST with retries on 5xx/network errors. Returns the final HTTP status (0 = no response)."""

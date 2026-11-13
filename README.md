@@ -50,6 +50,7 @@ That's it. Docker is installed if needed, fresh secrets are generated, the decoy
 ```bash
 sudo chimera-ctl access     # dashboard link + admin password
 sudo chimera-ctl bait       # ready-to-plant .mcp.json pointing at the decoy
+sudo chimera-ctl phone      # free phone push alerts (ntfy app)
 chimera-ctl status | logs | update | uninstall
 ```
 
@@ -75,6 +76,8 @@ curl -fsSL https://raw.githubusercontent.com/xsignon-secure/Chimera/main/install
 | `CHIMERA_MODE` | `approve` | `dry_run`, `approve` (one click) or `auto` |
 | `CHIMERA_PORT` | `8000` | Decoy port |
 | `CHIMERA_DISCORD_WEBHOOK` / `CHIMERA_SLACK_WEBHOOK` | none | Alerts and the dashboard link go there |
+| `CHIMERA_NTFY` | none | `yes` for free phone push alerts via the ntfy app (secret topic generated), or your own ntfy topic URL |
+| `CHIMERA_ISOLATION_TTL` | `168` | Hours before a block is lifted automatically (`0` = never) |
 | `CHIMERA_TUNNEL` | `yes` | Private HTTPS dashboard link via a free Cloudflare quick tunnel |
 | `CHIMERA_VERSION` | `main` | Git ref or release tag to install |
 
@@ -163,7 +166,10 @@ Client identity, capabilities, LLM think-time, natural-language justifications i
 Let a defender's AI agent triage and isolate. Attacker-written evidence is wrapped as untrusted data, so the attacker can't prompt-inject your defender.
 
 **📡 Plugs into your SIEM**
-JSONL, CEF over syslog (Splunk, QRadar, Wazuh, Elastic), signed webhooks, and STIX 2.1 bundles for MISP and OpenCTI.
+JSONL, CEF over syslog (Splunk, QRadar, Wazuh, Elastic), signed webhooks, STIX 2.1 bundles for MISP and OpenCTI, and a Prometheus metrics page.
+
+**📱 Alerts in your pocket**
+Free phone push alerts through the ntfy app, plus Slack and Discord. You're told if the decoy itself goes silent.
 
 </td>
 </tr>
@@ -219,6 +225,7 @@ Any client that speaks MCP over HTTP or stdio: Claude Code, Claude Desktop, Curs
 
 - [x] One-line installer, multi-arch image, `chimera-ctl`
 - [x] Wazuh active response, verified against a live manager
+- [x] Phone alerts, metrics page, sensor-silence alerts, dashboard search and export
 - [ ] Central console for many decoys
 - [ ] Azure and AWS marketplace images
 - [ ] Native Microsoft Sentinel and Splunk apps
