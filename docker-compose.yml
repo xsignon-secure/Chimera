@@ -39,7 +39,7 @@ services:
   honeypot:
     <<: *hardening
     build: .
-    image: chimera:1.0.0
+    image: ${CHIMERA_IMAGE:-ghcr.io/xsignon-secure/chimera:1.0.0}
     command: ["serve"]
     # No env_file on purpose: the honeypot is the component attackers touch, so it
     # receives only its own CHIMERA_* settings and never the responder's secrets.
@@ -72,7 +72,7 @@ services:
 
   responder:
     <<: *hardening
-    image: chimera:1.0.0
+    image: ${CHIMERA_IMAGE:-ghcr.io/xsignon-secure/chimera:1.0.0}
     entrypoint: ["chimera-responder"]
     command: []
     env_file: .env
